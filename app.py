@@ -617,7 +617,7 @@ def claim_material():
             if auto_delete:
                 cursor.execute('DELETE FROM materials WHERE id = ?', (curr_mat['id'],))
             else:
-                cursor.execute('UPDATE materials SET status = "completed" WHERE id = ?', (curr_mat['id'],))
+                cursor.execute("UPDATE materials SET status = 'completed' WHERE id = ?", (curr_mat['id'],))
             
             today_submitted += 1
             cursor.execute("""
@@ -651,7 +651,7 @@ def claim_material():
                     'error': f'⏳ 小红书养号防封保护：距离上一篇发布还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
                 })
     
-    cursor.execute('SELECT * FROM materials WHERE status = "available" ORDER BY id ASC LIMIT 1')
+    cursor.execute("SELECT * FROM materials WHERE status = 'available' ORDER BY id ASC LIMIT 1")
     next_mat = cursor.fetchone()
     
     if not next_mat:
@@ -664,7 +664,7 @@ def claim_material():
         })
         
     cursor.execute("""
-    UPDATE materials SET status = "assigned", assigned_to = ?, assigned_at = ? WHERE id = ?
+    UPDATE materials SET status = 'assigned', assigned_to = ?, assigned_at = ? WHERE id = ?
     """, (user_name, now_str, next_mat['id']))
     
     if not user:
@@ -1006,7 +1006,7 @@ def admin_clear_completed():
         
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM materials WHERE status = "completed"')
+    cursor.execute("DELETE FROM materials WHERE status = 'completed'")
     count = cursor.rowcount
     conn.commit()
     conn.close()
@@ -1024,15 +1024,15 @@ def admin_stats():
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM materials')
     total_materials = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "available"')
+    cursor.execute("SELECT COUNT(*) FROM materials WHERE status = 'available'")
     available = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "assigned"')
+    cursor.execute("SELECT COUNT(*) FROM materials WHERE status = 'assigned'")
     assigned = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "completed"')
+    cursor.execute("SELECT COUNT(*) FROM materials WHERE status = 'completed'")
     completed = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM submissions')
     total_submissions = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM submissions WHERE settlement_status = "settled"')
+    cursor.execute("SELECT COUNT(*) FROM submissions WHERE settlement_status = 'settled'")
     settled_submissions = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM users')
     total_users = cursor.fetchone()[0]
