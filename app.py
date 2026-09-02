@@ -1,0 +1,1361 @@
+import os
+import re
+import io
+import json
+import sqlite3
+import datetime
+import zipfile
+import mimetypes
+import urllib.request
+from flask import Flask, request, jsonify, send_file, render_template_string, Response
+
+app = Flask(__name__)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.db')
+DESKTOP_PATH = '/Users/air/Desktop'
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS materials (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT UNIQUE,
+        title TEXT,
+        folder_path TEXT,
+        images_json TEXT,
+        copy_text TEXT,
+        last_tag TEXT,
+        status TEXT DEFAULT 'available',
+        assigned_to TEXT,
+        assigned_at TEXT,
+        created_at TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_name TEXT,
+        material_id INTEGER,
+        material_name TEXT,
+        xhs_link TEXT,
+        xhs_title TEXT,
+        tag_expected TEXT,
+        tag_matched INTEGER DEFAULT 1,
+        check_status TEXT DEFAULT 'matched',
+        submitted_at TEXT,
+        status TEXT DEFAULT 'verified',
+        note TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        name TEXT PRIMARY KEY,
+        current_material_id INTEGER,
+        completed_count INTEGER DEFAULT 0,
+        last_active TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """)
+    
+    # Defaults
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[\"y\", \"小明\"]')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '1')")
+    
+    conn.commit()
+    conn.close()
+
+def get_setting(key, default=None):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+def set_setting(key, value):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+
+def extract_last_tag(copy_text):
+    """Extract the last hashtag from the copywriting text."""
+    if not copy_text:
+        return ''
+    tags = re.findall(r'#[^\s#]+', copy_text)
+    return tags[-1] if tags else ''
+
+def check_worker_auth(user_name, passcode):
+    auth_mode = get_setting('auth_mode', 'passcode')
+    real_passcode = get_setting('passcode', '8888').strip()
+    whitelist_str = get_setting('whitelist', '[]')
+    try:
+        whitelist = json.loads(whitelist_str)
+    except:
+        whitelist = []
+
+    if auth_mode == 'none':
+        return True, ""
+    
+    if auth_mode in ('passcode', 'both'):
+        if not passcode or passcode.strip() != real_passcode:
+            return False, "领料口令错误！请向 3金 索取正确口令。"
+            
+    if auth_mode in ('whitelist', 'both'):
+        if user_name not in whitelist:
+            return False, f"未授权的分发人员【{user_name}】！请联系 3金 添加至授权名单。"
+            
+    return True, ""
+
+def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
+    """Detect Xiaohongshu link validity and verify if it matches the assigned copy tag/title."""
+    if not ('xhslink.com' in url or 'xiaohongshu.com' in url):
+        return False, "请提供有效的小红书笔记分享链接 (xhslink.com 或 xiaohongshu.com)！", "", False, "invalid_url"
+        
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+            title_m = re.search(r'<title>(.*?)</title>', html)
+            fetched_title = title_m.group(1).replace(' - 小红书', '').strip() if title_m else ''
+            
+            # Check for tag keyword in HTML
+            tag_clean = expected_tag.replace('#', '').strip() if expected_tag else ''
+            tag_found = (tag_clean in html or tag_clean in fetched_title) if tag_clean else True
+            
+            # Title keywords check
+            keywords = [w for w in re.split(r'[\s_，。：:、！!]+', expected_title) if len(w) >= 2]
+            title_matched = any(k in html or k in fetched_title for k in keywords) if keywords else True
+            
+            check_status = 'matched' if (tag_found or title_matched) else 'suspicious'
+            return True, "", fetched_title or "已解析到有效笔记", (tag_found or title_matched), check_status
+    except Exception as e:
+        return True, "", "已提交待后台复核", True, "unverified"
+
+def scan_and_import_desktop_materials():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    target_dirs = []
+    if os.path.exists(DESKTOP_PATH):
+        for item in os.listdir(DESKTOP_PATH):
+            item_path = os.path.join(DESKTOP_PATH, item)
+            if os.path.isdir(item_path) and ('代运营整' in item or '代运营' in item):
+                target_dirs.append(item_path)
+
+    imported_count = 0
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for parent_dir in target_dirs:
+        for group in sorted(os.listdir(parent_dir)):
+            group_path = os.path.join(parent_dir, group)
+            if not os.path.isdir(group_path) or not re.match(r'^第\d+组', group):
+                continue
+            
+            files = os.listdir(group_path)
+            img_files = []
+            copy_text = ''
+            
+            for f in sorted(files):
+                f_lower = f.lower()
+                if f.endswith('.txt') or f.endswith('.md'):
+                    txt_path = os.path.join(group_path, f)
+                    try:
+                        with open(txt_path, 'r', encoding='utf-8') as tf:
+                            copy_text = tf.read().strip()
+                    except Exception:
+                        pass
+                elif any(f_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                    img_files.append(f)
+            
+            def img_sort_key(name):
+                if '1' in name or '封面' in name: return 1
+                if '2' in name or '内容' in name: return 2
+                if '3' in name or '尾图' in name: return 3
+                return 99
+            img_files.sort(key=img_sort_key)
+            
+            images_full = [os.path.join(group_path, img) for img in img_files]
+            
+            title = group
+            if copy_text:
+                first_line = copy_text.split('\n')[0].strip()
+                if first_line:
+                    title = first_line[:30]
+            
+            last_tag = extract_last_tag(copy_text)
+
+            cursor.execute("""
+            INSERT OR IGNORE INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'available', ?)
+            """, (group, title, group_path, json.dumps(images_full, ensure_ascii=False), copy_text, last_tag, now_str))
+            if cursor.rowcount > 0:
+                imported_count += 1
+            else:
+                # update copy_text and last_tag
+                cursor.execute("""
+                UPDATE materials SET copy_text = ?, last_tag = ? WHERE group_name = ?
+                """, (copy_text, last_tag, group))
+
+    conn.commit()
+    conn.close()
+    return imported_count
+
+@app.route('/api/download_zip')
+def download_zip():
+    mat_id = request.args.get('material_id', type=int)
+    if not mat_id:
+        return 'Missing material_id', 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM materials WHERE id = ?', (mat_id,))
+    mat = cursor.fetchone()
+    conn.close()
+    
+    if not mat:
+        return 'Material not found', 404
+    
+    images = json.loads(mat['images_json'])
+    copy_text = mat['copy_text']
+    
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, img_path in enumerate(images):
+            if os.path.exists(img_path):
+                zf.write(img_path, f"图{idx+1}_{os.path.basename(img_path)}")
+        if copy_text:
+            zf.writestr('发布文案.txt', copy_text)
+            
+    memory_file.seek(0)
+    filename = f"{mat['group_name']}.zip"
+    return send_file(memory_file, mimetype='application/zip', as_attachment=True, download_name=filename)
+
+@app.route('/api/image')
+def serve_image():
+    path = request.args.get('path', '')
+    if not path or not os.path.exists(path):
+        return 'Image not found', 404
+    if not (path.startswith(DESKTOP_PATH) or path.startswith('/Users/air/.gemini/antigravity')):
+        return 'Forbidden', 403
+    mime, _ = mimetypes.guess_type(path)
+    return send_file(path, mimetype=mime or 'image/jpeg')
+
+@app.route('/api/user/status', methods=['GET'])
+def get_user_status():
+    name = request.args.get('name', '').strip()
+    passcode = request.args.get('passcode', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': '请输入姓名/昵称'})
+        
+    is_auth, msg = check_worker_auth(name, passcode)
+    if not is_auth:
+        return jsonify({'success': False, 'error': msg, 'auth_failed': True})
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE name = ?', (name,))
+    user = cursor.fetchone()
+    
+    current_material = None
+    if user and user['current_material_id']:
+        cursor.execute('SELECT * FROM materials WHERE id = ?', (user['current_material_id'],))
+        mat = cursor.fetchone()
+        if mat and mat['status'] == 'assigned':
+            current_material = {
+                'id': mat['id'],
+                'group_name': mat['group_name'],
+                'title': mat['title'],
+                'images': json.loads(mat['images_json']),
+                'copy_text': mat['copy_text'],
+                'last_tag': mat['last_tag'] or extract_last_tag(mat['copy_text']),
+                'assigned_at': mat['assigned_at']
+            }
+            
+    cursor.execute('SELECT * FROM submissions WHERE user_name = ? ORDER BY id DESC', (name,))
+    subs = [dict(row) for row in cursor.fetchall()]
+    
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    cursor.execute('SELECT COUNT(*) FROM submissions WHERE user_name = ? AND submitted_at LIKE ?', (name, f'{today_str}%'))
+    today_count = cursor.fetchone()[0]
+    
+    daily_limit = int(get_setting('daily_limit', '3'))
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'user': {
+            'name': name,
+            'completed_count': user['completed_count'] if user else 0,
+            'today_count': today_count,
+            'daily_limit': daily_limit,
+            'current_material': current_material,
+            'history': subs
+        }
+    })
+
+@app.route('/api/claim', methods=['POST'])
+def claim_material():
+    data = request.json or {}
+    user_name = data.get('user_name', '').strip()
+    passcode = data.get('passcode', '').strip()
+    xhs_link = data.get('xhs_link', '').strip()
+    
+    if not user_name:
+        return jsonify({'success': False, 'error': '请输入姓名或微信昵称！'})
+        
+    is_auth, msg = check_worker_auth(user_name, passcode)
+    if not is_auth:
+        return jsonify({'success': False, 'error': msg, 'auth_failed': True})
+        
+    conn = get_db()
+    cursor = conn.cursor()
+    now_dt = datetime.datetime.now()
+    now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    today_str = now_dt.strftime('%Y-%m-%d')
+    
+    daily_limit = int(get_setting('daily_limit', '3'))
+    cursor.execute('SELECT COUNT(*) FROM submissions WHERE user_name = ? AND submitted_at LIKE ?', (user_name, f'{today_str}%'))
+    today_submitted = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT * FROM users WHERE name = ?', (user_name,))
+    user = cursor.fetchone()
+    current_mat_id = user['current_material_id'] if user else None
+    
+    # If user currently has an assigned task, verify link and check matching
+    if current_mat_id:
+        cursor.execute('SELECT * FROM materials WHERE id = ?', (current_mat_id,))
+        curr_mat = cursor.fetchone()
+        if curr_mat and curr_mat['status'] == 'assigned':
+            if not xhs_link:
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'error': f'你当前领取的【{curr_mat["group_name"]}】尚未提交小红书链接！请先粘贴发布链接打卡。',
+                    'current_material': {
+                        'id': curr_mat['id'],
+                        'group_name': curr_mat['group_name'],
+                        'title': curr_mat['title'],
+                        'images': json.loads(curr_mat['images_json']),
+                        'copy_text': curr_mat['copy_text'],
+                        'last_tag': curr_mat['last_tag'] or extract_last_tag(curr_mat['copy_text']),
+                        'assigned_at': curr_mat['assigned_at']
+                    }
+                })
+            
+            url_match = re.search(r'https?://[^\s]+', xhs_link)
+            clean_url = url_match.group(0) if url_match else xhs_link
+            
+            # 1. Anti-duplicate link check
+            cursor.execute('SELECT id, user_name, submitted_at FROM submissions WHERE xhs_link = ?', (clean_url,))
+            existing_sub = cursor.fetchone()
+            if existing_sub:
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'error': f'⚠️ 该小红书链接已被提交打卡过（提交人：{existing_sub["user_name"]}），请勿使用重复链接！'
+                })
+            
+            # 2. Automated Tag & Content Detection
+            expected_tag = curr_mat['last_tag'] or extract_last_tag(curr_mat['copy_text'])
+            is_valid_link, err_msg, xhs_title, matched, check_status = auto_detect_xhs_link_with_tag(clean_url, expected_tag, curr_mat['title'])
+            if not is_valid_link:
+                conn.close()
+                return jsonify({'success': False, 'error': err_msg})
+            
+            strict_tag = get_setting('strict_tag_check', '1') == '1'
+            if strict_tag and not matched and check_status == 'suspicious':
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'error': f'❌ 核验未通过：系统未在该小红书作品中检测到文案专属 Tag【{expected_tag}】或标题关键词！\n请确认是否按要求完整复制发布，切勿提交他人或无关笔记。'
+                })
+            
+            cursor.execute("""
+            INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')
+            """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str))
+            
+            cursor.execute('UPDATE materials SET status = "completed" WHERE id = ?', (curr_mat['id'],))
+            
+            today_submitted += 1
+            cursor.execute("""
+            UPDATE users SET completed_count = completed_count + 1, current_material_id = NULL, last_active = ?
+            WHERE name = ?
+            """, (now_str, user_name))
+            
+    # Check if reached daily limit
+    if today_submitted >= daily_limit:
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'success': False,
+            'reached_limit': True,
+            'error': f'🛑 你今天已成功打卡 {today_submitted} 篇，已达到单日领料上限（{daily_limit} 篇/天）！小红书单号频繁发帖易被平台限流，请明天再来领取~'
+        })
+        
+    # Check cool-down interval
+    cooldown_min = int(get_setting('cooldown_minutes', '0'))
+    if cooldown_min > 0:
+        cursor.execute('SELECT submitted_at FROM submissions WHERE user_name = ? ORDER BY id DESC LIMIT 1', (user_name,))
+        last_sub = cursor.fetchone()
+        if last_sub:
+            last_time = datetime.datetime.strptime(last_sub['submitted_at'], '%Y-%m-%d %H:%M:%S')
+            diff_seconds = (now_dt - last_time).total_seconds()
+            required_seconds = cooldown_min * 60
+            if diff_seconds < required_seconds:
+                remaining_min = int((required_seconds - diff_seconds) / 60) + 1
+                conn.commit()
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'error': f'⏳ 小红书养号防封保护：距离上一篇发布还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
+                })
+    
+    # Find next available material
+    cursor.execute('SELECT * FROM materials WHERE status = "available" ORDER BY id ASC LIMIT 1')
+    next_mat = cursor.fetchone()
+    
+    if not next_mat:
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'success': False,
+            'error': '🎉 当前素材池所有内容已全部被领完！请联系 3金 补充新一批素材。',
+            'no_more': True
+        })
+        
+    cursor.execute("""
+    UPDATE materials SET status = "assigned", assigned_to = ?, assigned_at = ? WHERE id = ?
+    """, (user_name, now_str, next_mat['id']))
+    
+    if not user:
+        cursor.execute("""
+        INSERT INTO users (name, current_material_id, completed_count, last_active)
+        VALUES (?, ?, 0, ?)
+        """, (user_name, next_mat['id'], now_str))
+    else:
+        cursor.execute("""
+        UPDATE users SET current_material_id = ?, last_active = ? WHERE name = ?
+        """, (next_mat['id'], now_str, user_name))
+        
+    conn.commit()
+    conn.close()
+    
+    last_tag = next_mat['last_tag'] or extract_last_tag(next_mat['copy_text'])
+    
+    return jsonify({
+        'success': True,
+        'message': f'恭喜领取成功！已为你分配：【{next_mat["group_name"]}】（今日第 {today_submitted + 1}/{daily_limit} 组）',
+        'material': {
+            'id': next_mat['id'],
+            'group_name': next_mat['group_name'],
+            'title': next_mat['title'],
+            'images': json.loads(next_mat['images_json']),
+            'copy_text': next_mat['copy_text'],
+            'last_tag': last_tag,
+            'assigned_at': now_str
+        }
+    })
+
+@app.route('/api/admin/login', methods=['POST'])
+def admin_login():
+    data = request.json or {}
+    pwd = data.get('password', '').strip()
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if pwd == real_pwd:
+        return jsonify({'success': True, 'token': 'admin_authed'})
+    return jsonify({'success': False, 'error': '管理密码错误！'})
+
+@app.route('/api/admin/settings', methods=['GET', 'POST'])
+def admin_settings():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权管理操作'}), 401
+        
+    if request.method == 'POST':
+        data = request.json or {}
+        if 'passcode' in data:
+            set_setting('passcode', data['passcode'].strip())
+        if 'auth_mode' in data:
+            set_setting('auth_mode', data['auth_mode'])
+        if 'daily_limit' in data:
+            set_setting('daily_limit', str(int(data['daily_limit'])))
+        if 'cooldown_minutes' in data:
+            set_setting('cooldown_minutes', str(int(data['cooldown_minutes'])))
+        if 'strict_tag_check' in data:
+            set_setting('strict_tag_check', '1' if data['strict_tag_check'] else '0')
+        if 'admin_password' in data and data['admin_password'].strip():
+            set_setting('admin_password', data['admin_password'].strip())
+        if 'whitelist' in data:
+            if isinstance(data['whitelist'], list):
+                set_setting('whitelist', json.dumps(data['whitelist'], ensure_ascii=False))
+            elif isinstance(data['whitelist'], str):
+                names = [n.strip() for n in re.split(r'[,，\n\s]+', data['whitelist']) if n.strip()]
+                set_setting('whitelist', json.dumps(names, ensure_ascii=False))
+        return jsonify({'success': True, 'message': '设置已成功保存！'})
+        
+    whitelist_str = get_setting('whitelist', '[]')
+    try:
+        whitelist = json.loads(whitelist_str)
+    except:
+        whitelist = []
+        
+    return jsonify({
+        'success': True,
+        'passcode': get_setting('passcode', '8888'),
+        'auth_mode': get_setting('auth_mode', 'passcode'),
+        'daily_limit': get_setting('daily_limit', '3'),
+        'cooldown_minutes': get_setting('cooldown_minutes', '0'),
+        'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
+        'admin_password': get_setting('admin_password', '060521'),
+        'whitelist': whitelist
+    })
+
+@app.route('/api/admin/stats', methods=['GET'])
+def admin_stats():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '管理密码错误或未登录'}), 401
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM materials')
+    total_materials = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "available"')
+    available = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "assigned"')
+    assigned = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM materials WHERE status = "completed"')
+    completed = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM submissions')
+    total_submissions = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM users')
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT id, group_name, title, last_tag, status, assigned_to, assigned_at FROM materials ORDER BY id ASC')
+    materials_list = [dict(r) for r in cursor.fetchall()]
+    
+    cursor.execute('SELECT * FROM submissions ORDER BY id DESC')
+    submissions_list = [dict(r) for r in cursor.fetchall()]
+    
+    conn.close()
+    return jsonify({
+        'success': True,
+        'stats': {
+            'total_materials': total_materials,
+            'available': available,
+            'assigned': assigned,
+            'completed': completed,
+            'total_submissions': total_submissions,
+            'total_users': total_users
+        },
+        'materials': materials_list,
+        'submissions': submissions_list
+    })
+
+@app.route('/api/admin/sync', methods=['POST'])
+def admin_sync():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    count = scan_and_import_desktop_materials()
+    return jsonify({'success': True, 'imported': count, 'message': f'成功从桌面同步导入 {count} 组新素材！'})
+
+@app.route('/api/admin/export_csv', methods=['GET'])
+def export_csv():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, user_name, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status FROM submissions ORDER BY id DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    
+    csv_content = "\ufeffID,分发人员姓名,领取作品组名,小红书发布链接,抓取标题,文案核验Tag,Tag核验结果,系统质检状态,提交打卡时间,核验状态\n"
+    for r in rows:
+        t_str = r["xhs_title"] if r["xhs_title"] else "-"
+        tag_str = r["tag_expected"] if r["tag_expected"] else "-"
+        match_str = "已匹配Tag" if r["tag_matched"] == 1 else "未检测到Tag"
+        c_str = r["check_status"] if r["check_status"] else "-"
+        csv_content += f'"{r["id"]}","{r["user_name"]}","{r["material_name"]}","{r["xhs_link"]}","{t_str}","{tag_str}","{match_str}","{c_str}","{r["submitted_at"]}","{r["status"]}"\n'
+        
+    filename = f"小红书矩阵打卡统计_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-disposition": f"attachment; filename={filename}"}
+    )
+
+INDEX_HTML = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>小红书矩阵分发 · 凭链接自动领料平台</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+        .xhs-gradient { background: linear-gradient(135deg, #ff2442 0%, #ff4d6a 100%); }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen pb-16">
+
+    <!-- Top Navigation Header -->
+    <header class="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200 px-4 py-3 shadow-sm">
+        <div class="max-w-3xl mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+                <div class="w-8 h-8 rounded-lg xhs-gradient flex items-center justify-center text-white font-bold text-lg shadow-sm">
+                    小
+                </div>
+                <div>
+                    <h1 class="font-bold text-slate-900 leading-none text-base">矩阵分发 · 领料打卡台</h1>
+                    <p class="text-xs text-slate-400 mt-0.5">自动识别文案Tag · 即时派单</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="openAdmin()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-full font-bold transition flex items-center space-x-1 border border-slate-200 shadow-sm">
+                    <span>👑 3金管理后台</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-3xl mx-auto px-4 pt-4 space-y-4">
+
+        <!-- User Profile Card -->
+        <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+            <div class="flex items-center justify-between pb-2.5 border-b border-slate-100">
+                <div class="flex items-center space-x-1.5">
+                    <span class="text-base">🔐</span>
+                    <span class="font-bold text-sm text-slate-800">分发人员身份与口令验证</span>
+                </div>
+                <div id="completedBadge" class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-100 hidden">
+                    今日已打卡 <span id="todayCountSpan">0</span>/<span id="dailyLimitSpan">3</span> 组
+                </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                    <label class="block text-[11px] font-semibold text-slate-500 mb-1">分发人姓名 / 微信昵称：</label>
+                    <input type="text" id="userNameInput" placeholder="例如: y / 小明" 
+                        class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"
+                        oninput="saveCredentials()">
+                </div>
+                <div>
+                    <label class="block text-[11px] font-semibold text-slate-500 mb-1">领料口令 / 工号：</label>
+                    <input type="password" id="passcodeInput" placeholder="请输入领料口令" 
+                        class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"
+                        oninput="saveCredentials()">
+                </div>
+            </div>
+            <div class="mt-2.5 flex justify-end">
+                <button onclick="checkUserStatus()" class="px-4 py-2 text-xs bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold transition shadow-sm">
+                    🔐 验证并同步状态
+                </button>
+            </div>
+        </div>
+
+        <!-- Claiming & Verification Card -->
+        <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <h2 class="font-bold text-base text-slate-900 flex items-center space-x-2">
+                <span>⚡️</span>
+                <span>领料 & 链接打卡</span>
+            </h2>
+
+            <!-- State 1: No active task, can claim first task -->
+            <div id="firstClaimBox" class="mt-3 space-y-3">
+                <div class="p-3 bg-amber-50 rounded-xl border border-amber-200/60 text-xs text-amber-800 leading-relaxed">
+                    📌 <strong>领料说明</strong>：输入姓名与口令后，点击下方按钮即可领取今日第 1 组发布素材！
+                </div>
+                <button onclick="claimMaterial(false)" class="w-full py-3.5 xhs-gradient hover:opacity-95 text-white rounded-xl font-bold text-sm shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2">
+                    <span>🎁 领取第 1 组发布素材</span>
+                </button>
+            </div>
+
+            <!-- State 2: Has active task, MUST submit link to get next -->
+            <div id="submitLinkBox" class="mt-3 space-y-3 hidden">
+                <div class="p-3.5 bg-blue-50 rounded-xl border border-blue-200/60 text-xs text-blue-900">
+                    <div class="font-bold flex items-center justify-between">
+                        <span>⏳ 当前进行中任务：<span id="activeGroupName" class="text-blue-700"></span></span>
+                        <span class="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-bold">待回传链接</span>
+                    </div>
+                    <p class="mt-1 text-slate-600">小红书发布完成后，复制该作品的<strong>分享链接</strong>粘贴在下方，即可提交打卡并领取下一组新素材！</p>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">粘贴小红书已发布笔记链接：</label>
+                    <textarea id="xhsLinkInput" rows="2" placeholder="长按粘贴小红书笔记分享链接 (例如: http://xhslink.com/... 或完整分享文本)"
+                        class="w-full p-3 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"></textarea>
+                </div>
+
+                <button onclick="claimMaterial(true)" id="claimBtn" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-sm shadow-md shadow-emerald-600/20 transition flex items-center justify-center space-x-2">
+                    <span>🚀 提交打卡 ➔ 领取下一组</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Material Details Card (Show when a material is active) -->
+        <div id="materialContentCard" class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 hidden space-y-4">
+            <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div class="flex items-center space-x-2">
+                    <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700" id="matBadge">第01组</span>
+                    <h3 class="font-bold text-sm text-slate-900 truncate max-w-[200px] sm:max-w-sm" id="matTitle">文案标题</h3>
+                </div>
+                <span class="text-xs text-slate-400" id="matAssignedTime">刚刚分配</span>
+            </div>
+
+            <!-- 3 Images Grid -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold text-slate-700">🖼️ 发布配图 (按 1、2、3 顺序配图)：</span>
+                    <div class="flex items-center space-x-2">
+                        <a id="downloadZipBtn" href="#" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded-lg font-bold transition border border-slate-200 flex items-center space-x-1">
+                            <span>📥 一键打包下载 (ZIP)</span>
+                        </a>
+                        <span class="text-xs text-red-500 font-medium hidden sm:inline">💡 点击可放大 · 长按保存</span>
+                    </div>
+                </div>
+                <div class="grid grid-cols-3 gap-2" id="imagesGrid">
+                    <!-- Image Cards populated by JS -->
+                </div>
+            </div>
+
+            <!-- Copywriting Text Box -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold text-slate-700">📝 发布文案 (第一行为标题，全选直接发布)：</span>
+                    <button onclick="copyCopywriting()" id="copyBtn" class="text-xs bg-red-50 hover:bg-red-100 text-red-600 font-bold px-3 py-1 rounded-lg transition border border-red-200 flex items-center space-x-1">
+                        <span>📋 一键复制文案</span>
+                    </button>
+                </div>
+                <div class="relative">
+                    <pre id="copyTextPre" class="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 whitespace-pre-wrap font-sans max-h-60 overflow-y-auto leading-relaxed select-all"></pre>
+                </div>
+            </div>
+
+            <!-- Rules Reminder Card -->
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-1.5">
+                <div class="font-bold text-slate-800 flex items-center space-x-1">
+                    <span>⚠️</span>
+                    <span>发布规范与客户引流指引</span>
+                </div>
+                <p>1. <strong>发布顺序</strong>：图片必须按 图1(封面)、图2(内容)、图3(尾图) 顺序选择上传；</p>
+                <p>2. <strong>客户留资</strong>：有人在评论区留言时，先回“已私”，然后在私信发引导视频；</p>
+                <p>3. <strong>提成结算</strong>：客户成功添加微信后，截图发给 3金 当天结算！</p>
+            </div>
+        </div>
+
+        <!-- History Submissions -->
+        <div id="historyCard" class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 hidden">
+            <h3 class="font-bold text-sm text-slate-900 mb-3 flex items-center space-x-1.5">
+                <span>📑</span>
+                <span>我的打卡记录</span>
+            </h3>
+            <div class="space-y-2 text-xs" id="historyList">
+                <!-- History Items -->
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Admin Password Prompt Modal -->
+    <div id="adminLoginModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div class="text-center">
+                <div class="w-12 h-12 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto text-2xl mb-2">👑</div>
+                <h3 class="font-bold text-base text-slate-900">3金 管理后台登录</h3>
+                <p class="text-xs text-slate-400 mt-0.5">请输入管理员密码</p>
+            </div>
+            <div>
+                <input type="password" id="adminPwdInput" placeholder="输入管理密码" 
+                    class="w-full px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white text-center font-bold tracking-widest">
+            </div>
+            <div class="flex gap-2">
+                <button onclick="closeAdminLogin()" class="flex-1 py-2.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold transition">取消</button>
+                <button onclick="verifyAdminLogin()" class="flex-1 py-2.5 text-xs bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold transition shadow-sm">进入后台</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Dashboard Modal -->
+    <div id="adminModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+            <!-- Modal Header -->
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
+                <div class="flex items-center space-x-2">
+                    <span class="text-xl">👑</span>
+                    <div>
+                        <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
+                        <p class="text-xs text-slate-400">实时打卡审核 · 文案Tag核验 · 权限配置</p>
+                    </div>
+                </div>
+                <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
+            </div>
+
+            <!-- Modal Content (Scrollable) -->
+            <div class="p-5 overflow-y-auto space-y-5 flex-1">
+                
+                <!-- Security & Access Settings Card -->
+                <div class="p-4 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="font-bold text-xs text-amber-900 flex items-center space-x-1.5 uppercase tracking-wider">
+                            <span>🔐</span>
+                            <span>领料权限与矩阵风控配置</span>
+                        </h3>
+                        <span class="text-[10px] text-amber-700 bg-amber-100 px-2 py-0.5 rounded font-semibold">即时生效</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">1. 统一领料口令：</label>
+                            <input type="text" id="settingPasscode" placeholder="如: 8888" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">2. 每日单人领料上限 (篇/天)：</label>
+                            <input type="number" id="settingDailyLimit" min="1" max="20" placeholder="如: 3" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 文案Tag与标题严格核验：</label>
+                            <select id="settingStrictTag" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
+                                <option value="1">开启严格模式 (Tag与标题不符直接拒绝打卡)</option>
+                                <option value="0">宽松模式 (未检测到仅后台打标提醒)</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">4. 发帖冷却间隔 (分钟)：</label>
+                            <input type="number" id="settingCooldown" min="0" max="720" placeholder="0 表示不限制" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
+                        </div>
+
+                        <div class="sm:col-span-2">
+                            <label class="block font-semibold text-slate-700 mb-1">5. 白名单人员名单 (用逗号或换行隔开)：</label>
+                            <textarea id="settingWhitelist" rows="2" placeholder="例如: y, 小明, 阿峰, 兼职01" 
+                                class="w-full p-2.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800 text-xs"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-end pt-1">
+                        <button onclick="saveAdminSettings()" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm transition">
+                            💾 保存配置
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Stat Cards -->
+                <div class="grid grid-cols-3 gap-3">
+                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
+                        <div class="text-xs text-slate-500 font-medium">总素材组数</div>
+                        <div class="text-xl font-bold text-slate-900 mt-0.5" id="statTotal">0</div>
+                    </div>
+                    <div class="bg-emerald-50 p-3 rounded-xl border border-emerald-100 text-center">
+                        <div class="text-xs text-emerald-700 font-medium">剩余待领</div>
+                        <div class="text-xl font-bold text-emerald-600 mt-0.5" id="statAvailable">0</div>
+                    </div>
+                    <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
+                        <div class="text-xs text-blue-700 font-medium">今日已打卡</div>
+                        <div class="text-xl font-bold text-blue-600 mt-0.5" id="statSubmissions">0</div>
+                    </div>
+                </div>
+
+                <!-- Admin Action Buttons -->
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="syncDesktopMaterials()" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-semibold flex items-center space-x-1 transition">
+                        <span>🔄 扫描并同步桌面今日素材</span>
+                    </button>
+                    <a href="/api/admin/export_csv" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-1 transition">
+                        <span>📥 导出打卡记录 (Excel/CSV)</span>
+                    </a>
+                </div>
+
+                <!-- Recent Submissions Table -->
+                <div>
+                    <h3 class="font-bold text-xs text-slate-800 mb-2 uppercase tracking-wider">📋 实时打卡审核表：</h3>
+                    <div class="border border-slate-200 rounded-xl overflow-hidden">
+                        <table class="w-full text-xs text-left border-collapse">
+                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr>
+                                    <th class="p-2.5">时间</th>
+                                    <th class="p-2.5">人员</th>
+                                    <th class="p-2.5">领取组名</th>
+                                    <th class="p-2.5">文案尾Tag</th>
+                                    <th class="p-2.5">小红书链接与标题</th>
+                                    <th class="p-2.5">核验状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminSubmissionsBody" class="divide-y divide-slate-100">
+                                <tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Material Inventory Status -->
+                <div>
+                    <h3 class="font-bold text-xs text-slate-800 mb-2 uppercase tracking-wider">📦 素材库存状态清单：</h3>
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                        <table class="w-full text-xs text-left border-collapse">
+                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr>
+                                    <th class="p-2">组号</th>
+                                    <th class="p-2">标题</th>
+                                    <th class="p-2">尾Tag</th>
+                                    <th class="p-2">状态</th>
+                                    <th class="p-2">领走人</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminMaterialsBody" class="divide-y divide-slate-100">
+                                <tr><td colspan="5" class="p-4 text-center text-slate-400">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Preview Modal -->
+    <div id="imgModal" class="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-2 hidden" onclick="closeImgModal()">
+        <img id="modalImg" class="max-w-full max-h-full rounded-lg shadow-2xl object-contain">
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-lg z-50 transition-all duration-300 opacity-0 pointer-events-none">
+        通知消息
+    </div>
+
+    <script>
+        let currentMaterialData = null;
+        let adminAuthToken = localStorage.getItem('xhs_admin_pwd') || '';
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedName = localStorage.getItem('xhs_distributor_name') || '';
+            const savedPasscode = localStorage.getItem('xhs_distributor_passcode') || '8888';
+            if (savedName) document.getElementById('userNameInput').value = savedName;
+            if (savedPasscode) document.getElementById('passcodeInput').value = savedPasscode;
+            if (savedName && savedPasscode) checkUserStatus();
+        });
+
+        function saveCredentials() {
+            const name = document.getElementById('userNameInput').value.trim();
+            const passcode = document.getElementById('passcodeInput').value.trim();
+            if (name) localStorage.setItem('xhs_distributor_name', name);
+            if (passcode) localStorage.setItem('xhs_distributor_passcode', passcode);
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.remove('opacity-0', 'pointer-events-none');
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'pointer-events-none');
+            }, 3500);
+        }
+
+        async function checkUserStatus() {
+            const name = document.getElementById('userNameInput').value.trim();
+            const passcode = document.getElementById('passcodeInput').value.trim();
+            if (!name) {
+                showToast('请先输入你的姓名或微信昵称');
+                return;
+            }
+            saveCredentials();
+
+            try {
+                const res = await fetch(`/api/user/status?name=${encodeURIComponent(name)}&passcode=${encodeURIComponent(passcode)}`);
+                const data = await res.json();
+                if (data.success) {
+                    renderUserState(data.user);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('网络连接失败');
+            }
+        }
+
+        function renderUserState(user) {
+            const badge = document.getElementById('completedBadge');
+            const todayCountSpan = document.getElementById('todayCountSpan');
+            const dailyLimitSpan = document.getElementById('dailyLimitSpan');
+            const firstClaimBox = document.getElementById('firstClaimBox');
+            const submitLinkBox = document.getElementById('submitLinkBox');
+            const activeGroupName = document.getElementById('activeGroupName');
+            const matCard = document.getElementById('materialContentCard');
+            const historyCard = document.getElementById('historyCard');
+            const historyList = document.getElementById('historyList');
+
+            badge.classList.remove('hidden');
+            todayCountSpan.innerText = user.today_count || 0;
+            dailyLimitSpan.innerText = user.daily_limit || 3;
+
+            if (user.current_material) {
+                firstClaimBox.classList.add('hidden');
+                submitLinkBox.classList.remove('hidden');
+                activeGroupName.innerText = user.current_material.group_name;
+                renderMaterialCard(user.current_material);
+            } else {
+                firstClaimBox.classList.remove('hidden');
+                submitLinkBox.classList.add('hidden');
+                matCard.classList.add('hidden');
+            }
+
+            if (user.history && user.history.length > 0) {
+                historyCard.classList.remove('hidden');
+                historyList.innerHTML = user.history.map(item => `
+                    <div class="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between">
+                        <div>
+                            <div class="font-bold text-slate-800">${item.material_name}</div>
+                            <div class="text-[11px] text-slate-500 mt-0.5 flex items-center space-x-1.5">
+                                <span>🏷️ ${item.tag_expected || '-'}</span>
+                                <span class="text-slate-300">|</span>
+                                <span class="truncate max-w-[140px]">${item.xhs_title || '已打卡'}</span>
+                            </div>
+                            <a href="${item.xhs_link}" target="_blank" class="text-blue-600 hover:underline truncate max-w-[220px] block mt-0.5">
+                                🔗 ${item.xhs_link}
+                            </a>
+                        </div>
+                        <div class="text-right text-[11px] text-slate-400">
+                            <div>${item.submitted_at.split(' ')[1]}</div>
+                            <span class="inline-block mt-0.5 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-semibold">已核验</span>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                historyCard.classList.add('hidden');
+            }
+        }
+
+        function renderMaterialCard(mat) {
+            currentMaterialData = mat;
+            const matCard = document.getElementById('materialContentCard');
+            const matBadge = document.getElementById('matBadge');
+            const matTitle = document.getElementById('matTitle');
+            const matTime = document.getElementById('matAssignedTime');
+            const imagesGrid = document.getElementById('imagesGrid');
+            const copyPre = document.getElementById('copyTextPre');
+            const zipBtn = document.getElementById('downloadZipBtn');
+
+            matBadge.innerText = mat.group_name.split('_')[0] || '专属素材';
+            matTitle.innerText = mat.title || mat.group_name;
+            matTime.innerText = mat.assigned_at ? mat.assigned_at.split(' ')[1] + ' 分配' : '';
+            copyPre.innerText = mat.copy_text;
+            zipBtn.href = `/api/download_zip?material_id=${mat.id}`;
+
+            imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
+                const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
+                const label = labels[idx] || `图${idx+1}`;
+                const encodedPath = encodeURIComponent(imgPath);
+                return `
+                    <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col">
+                        <img src="/api/image?path=${encodedPath}" 
+                             onclick="previewImg('/api/image?path=${encodedPath}')" 
+                             class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
+                             alt="${label}">
+                        <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
+                            ${label}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            matCard.classList.remove('hidden');
+        }
+
+        async function claimMaterial(isNext) {
+            const name = document.getElementById('userNameInput').value.trim();
+            const passcode = document.getElementById('passcodeInput').value.trim();
+            if (!name) {
+                showToast('请先输入你的姓名或微信昵称！');
+                return;
+            }
+            if (!passcode) {
+                showToast('请填写领料口令！');
+                return;
+            }
+            saveCredentials();
+
+            let xhsLink = '';
+            if (isNext) {
+                xhsLink = document.getElementById('xhsLinkInput').value.trim();
+                if (!xhsLink) {
+                    showToast('请粘贴刚刚发布的小红书链接后再提交！');
+                    return;
+                }
+            }
+
+            const btn = document.getElementById('claimBtn');
+            if (btn && isNext) {
+                btn.innerHTML = '<span>🔍 正在提交核验...</span>';
+                btn.disabled = true;
+            }
+
+            try {
+                const res = await fetch('/api/claim', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        user_name: name,
+                        passcode: passcode,
+                        xhs_link: xhsLink
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    document.getElementById('xhsLinkInput').value = '';
+                    checkUserStatus();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('网络请求异常');
+            } finally {
+                if (btn && isNext) {
+                    btn.innerHTML = '<span>🚀 提交打卡 ➔ 领取下一组</span>';
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        function copyCopywriting() {
+            if (!currentMaterialData || !currentMaterialData.copy_text) return;
+            navigator.clipboard.writeText(currentMaterialData.copy_text).then(() => {
+                const btn = document.getElementById('copyBtn');
+                btn.innerHTML = '<span>✅ 文案已复制！直接去粘贴</span>';
+                btn.classList.replace('bg-red-50', 'bg-emerald-50');
+                btn.classList.replace('text-red-600', 'text-emerald-700');
+                btn.classList.replace('border-red-200', 'border-emerald-200');
+                showToast('文案已复制到剪贴板！');
+                setTimeout(() => {
+                    btn.innerHTML = '<span>📋 一键复制文案</span>';
+                    btn.classList.replace('bg-emerald-50', 'bg-red-50');
+                    btn.classList.replace('text-emerald-700', 'text-red-600');
+                    btn.classList.replace('border-emerald-200', 'border-red-200');
+                }, 3000);
+            });
+        }
+
+        function previewImg(url) {
+            document.getElementById('modalImg').src = url;
+            document.getElementById('imgModal').classList.remove('hidden');
+        }
+
+        function closeImgModal() {
+            document.getElementById('imgModal').classList.add('hidden');
+        }
+
+        function openAdmin() {
+            if (adminAuthToken) {
+                toggleAdminModal();
+            } else {
+                document.getElementById('adminLoginModal').classList.remove('hidden');
+            }
+        }
+
+        function closeAdminLogin() {
+            document.getElementById('adminLoginModal').classList.add('hidden');
+        }
+
+        async function verifyAdminLogin() {
+            const pwd = document.getElementById('adminPwdInput').value.trim();
+            if (!pwd) {
+                showToast('请输入管理密码');
+                return;
+            }
+            try {
+                const res = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ password: pwd })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    adminAuthToken = pwd;
+                    localStorage.setItem('xhs_admin_pwd', pwd);
+                    closeAdminLogin();
+                    toggleAdminModal();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('登录验证异常');
+            }
+        }
+
+        function toggleAdminModal() {
+            const modal = document.getElementById('adminModal');
+            if (modal.classList.contains('hidden')) {
+                modal.classList.remove('hidden');
+                loadAdminData();
+                loadAdminSettings();
+            } else {
+                modal.classList.add('hidden');
+            }
+        }
+
+        async function loadAdminSettings() {
+            try {
+                const res = await fetch('/api/admin/settings', {
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('settingPasscode').value = data.passcode;
+                    document.getElementById('settingDailyLimit').value = data.daily_limit || 3;
+                    document.getElementById('settingCooldown').value = data.cooldown_minutes || 0;
+                    document.getElementById('settingStrictTag').value = data.strict_tag_check ? '1' : '0';
+                    document.getElementById('settingWhitelist').value = data.whitelist.join(', ');
+                }
+            } catch (err) {}
+        }
+
+        async function saveAdminSettings() {
+            const passcode = document.getElementById('settingPasscode').value.trim();
+            const daily_limit = document.getElementById('settingDailyLimit').value.trim();
+            const cooldown = document.getElementById('settingCooldown').value.trim();
+            const strict_tag = document.getElementById('settingStrictTag').value === '1';
+            const whitelist_str = document.getElementById('settingWhitelist').value;
+
+            try {
+                const res = await fetch('/api/admin/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        passcode: passcode,
+                        daily_limit: daily_limit,
+                        cooldown_minutes: cooldown,
+                        strict_tag_check: strict_tag,
+                        whitelist: whitelist_str
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('保存设置失败');
+            }
+        }
+
+        async function loadAdminData() {
+            try {
+                const res = await fetch('/api/admin/stats', {
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('statTotal').innerText = data.stats.total_materials;
+                    document.getElementById('statAvailable').innerText = data.stats.available;
+                    document.getElementById('statSubmissions').innerText = data.stats.total_submissions;
+
+                    const subBody = document.getElementById('adminSubmissionsBody');
+                    if (data.submissions.length > 0) {
+                        subBody.innerHTML = data.submissions.map(s => `
+                            <tr class="hover:bg-slate-50">
+                                <td class="p-2.5 text-slate-500 whitespace-nowrap">${s.submitted_at.split(' ')[1]}</td>
+                                <td class="p-2.5 font-bold text-slate-800">${s.user_name}</td>
+                                <td class="p-2.5 text-slate-700 truncate max-w-[100px]">${s.material_name}</td>
+                                <td class="p-2.5 font-mono text-[11px] font-bold text-blue-600">${s.tag_expected || '-'}</td>
+                                <td class="p-2.5">
+                                    <div class="font-semibold text-slate-800 truncate max-w-[130px]">${s.xhs_title || '已打卡'}</div>
+                                    <a href="${s.xhs_link}" target="_blank" class="text-red-600 text-[11px] font-semibold hover:underline flex items-center space-x-1">
+                                        <span>🔗 点此核验</span>
+                                    </a>
+                                </td>
+                                <td class="p-2.5 whitespace-nowrap">
+                                    ${s.tag_matched === 1 ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">🟢 内容匹配</span>' :
+                                      '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">🟡 需复核</span>'}
+                                </td>
+                            </tr>
+                        `).join('');
+                    } else {
+                        subBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>';
+                    }
+
+                    const matBody = document.getElementById('adminMaterialsBody');
+                    if (data.materials.length > 0) {
+                        matBody.innerHTML = data.materials.map(m => `
+                            <tr class="hover:bg-slate-50">
+                                <td class="p-2 font-bold text-slate-700">${m.group_name.split('_')[0]}</td>
+                                <td class="p-2 text-slate-600 truncate max-w-[140px]">${m.title}</td>
+                                <td class="p-2 font-mono text-[11px] text-blue-600">${m.last_tag || '-'}</td>
+                                <td class="p-2">
+                                    ${m.status === 'available' ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">待领取</span>' :
+                                      m.status === 'assigned' ? '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 font-bold rounded">领用中</span>' :
+                                      '<span class="px-2 py-0.5 bg-slate-100 text-slate-600 font-bold rounded">已完成</span>'}
+                                </td>
+                                <td class="p-2 text-slate-500">${m.assigned_to || '-'}</td>
+                            </tr>
+                        `).join('');
+                    }
+                } else if (data.error) {
+                    adminAuthToken = '';
+                    localStorage.removeItem('xhs_admin_pwd');
+                    openAdmin();
+                }
+            } catch (err) {
+                showToast('加载管理后台失败');
+            }
+        }
+
+        async function syncDesktopMaterials() {
+            try {
+                const res = await fetch('/api/admin/sync', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                showToast(data.message);
+                loadAdminData();
+            } catch (err) {
+                showToast('同步失败');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(INDEX_HTML)
+
+if __name__ == '__main__':
+    init_db()
+    scan_and_import_desktop_materials()
+    print("Starting server on port 5050...")
+    app.run(host='0.0.0.0', port=5050, debug=False)
