@@ -7,13 +7,21 @@ import sqlite3
 import datetime
 import zipfile
 import mimetypes
+import hashlib
 import urllib.request
-from flask import Flask, request, jsonify, send_file, render_template_string, Response
+from flask import Flask, request, jsonify, send_file, render_template_string, Response, make_response
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 app = Flask(__name__)
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.db')
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MATERIALS_DIR = os.path.join(PROJECT_ROOT, 'materials')
+THUMB_CACHE_DIR = os.path.join(PROJECT_ROOT, '.thumbs_cache')
+os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -152,20 +160,16 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
 def resolve_file_path(path_str):
     if not path_str:
         return None
-    # 1. Exact path
     if os.path.exists(path_str):
         return path_str
-    # 2. Relative to PROJECT_ROOT
     p1 = os.path.join(PROJECT_ROOT, path_str.lstrip('/'))
     if os.path.exists(p1):
         return p1
-    # 3. Search in MATERIALS_DIR
     clean_parts = path_str.replace('\\', '/').split('/')
     for i in range(len(clean_parts)):
         sub = os.path.join(MATERIALS_DIR, *clean_parts[i:])
         if os.path.exists(sub):
             return sub
-    # 4. Search Desktop fallback (if on local mac)
     for i in range(len(clean_parts)):
         sub = os.path.join('/Users/air/Desktop/9月1日代运营整', *clean_parts[i:])
         if os.path.exists(sub):
@@ -210,7 +214,6 @@ def scan_and_import_materials_from_folder():
             return 99
         img_files.sort(key=img_sort_key)
         
-        # Store clean relative path: materials/第01组_.../图1_封面.png
         images_rel = [f"materials/{group}/{img}" for img in img_files]
         
         title = group
@@ -285,6 +288,7 @@ def download_zip():
 @app.route('/api/image')
 def serve_image():
     path = request.args.get('path', '')
+    is_thumb = request.args.get('thumb', '0') == '1'
     if not path:
         return 'Image not found', 404
         
@@ -293,16 +297,40 @@ def serve_image():
             header, encoded = path.split(',', 1)
             data = base64.b64decode(encoded)
             mime = header.split(';')[0].replace('data:', '')
-            return Response(data, mimetype=mime or 'image/jpeg')
+            resp = make_response(data)
+            resp.headers['Content-Type'] = mime or 'image/jpeg'
+            resp.headers['Cache-Control'] = 'public, max-age=604800'
+            return resp
         except Exception:
             return 'Invalid base64', 400
 
     real_path = resolve_file_path(path)
-    if real_path and os.path.exists(real_path):
-        mime, _ = mimetypes.guess_type(real_path)
-        return send_file(real_path, mimetype=mime or 'image/jpeg')
-        
-    return 'Image not found', 404
+    if not real_path or not os.path.exists(real_path):
+        return 'Image not found', 404
+
+    # High-speed WebP Thumbnail Generator for Web Preview
+    if is_thumb and PIL_AVAILABLE:
+        try:
+            ext = os.path.splitext(real_path)[1].lower()
+            if ext in ('.png', '.jpg', '.jpeg', '.webp'):
+                cache_key = hashlib.md5(f"{real_path}_{os.path.getmtime(real_path)}".encode()).hexdigest()
+                thumb_file = os.path.join(THUMB_CACHE_DIR, f"{cache_key}.webp")
+                if not os.path.exists(thumb_file):
+                    with Image.open(real_path) as im:
+                        im.thumbnail((750, 1000), Image.Resampling.LANCZOS)
+                        if im.mode in ('RGBA', 'P'):
+                            im = im.convert('RGB')
+                        im.save(thumb_file, 'WEBP', quality=82)
+                resp = make_response(send_file(thumb_file, mimetype='image/webp'))
+                resp.headers['Cache-Control'] = 'public, max-age=604800'
+                return resp
+        except Exception:
+            pass
+
+    mime, _ = mimetypes.guess_type(real_path)
+    resp = make_response(send_file(real_path, mimetype=mime or 'image/jpeg'))
+    resp.headers['Cache-Control'] = 'public, max-age=604800'
+    return resp
 
 @app.route('/api/user/status', methods=['GET'])
 def get_user_status():
@@ -922,7 +950,7 @@ INDEX_HTML = """
                         <a id="downloadZipBtn" href="#" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded-lg font-bold transition border border-slate-200 flex items-center space-x-1">
                             <span>📥 一键打包下载 (ZIP)</span>
                         </a>
-                        <span class="text-xs text-red-500 font-medium hidden sm:inline">💡 点击可放大 · 长按保存</span>
+                        <span class="text-xs text-red-500 font-medium hidden sm:inline">💡 点击放大 · 长按保存</span>
                     </div>
                 </div>
                 <div class="grid grid-cols-3 gap-2" id="imagesGrid">
@@ -1425,11 +1453,13 @@ INDEX_HTML = """
             imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
                 const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
                 const label = labels[idx] || `图${idx+1}`;
-                const srcUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
+                const thumbUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}&thumb=1`;
+                const fullUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
                 return `
-                    <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col">
-                        <img src="${srcUrl}" 
-                             onclick="previewImg('${srcUrl}')" 
+                    <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col shadow-sm">
+                        <img src="${thumbUrl}" 
+                             loading="eager"
+                             onclick="previewImg('${fullUrl}')" 
                              class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
                              alt="${label}">
                         <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
