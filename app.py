@@ -133,8 +133,8 @@ def check_worker_auth(user_name, passcode):
     return True, ""
 
 def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
-    if not ('xhslink.com' in url or 'xiaohongshu.com' in url):
-        return False, "请提供有效的小红书笔记分享链接 (xhslink.com 或 xiaohongshu.com)！", "", False, "invalid_url"
+    if not any(k in url.lower() for k in ['xhslink.com', 'xhslink.cn', 'xiaohongshu.com']):
+        return False, "请提供有效的小红书分享链接 (包含 xhslink.com / xhslink.cn / xiaohongshu.com)！", "", False, "invalid_url"
         
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
@@ -433,8 +433,8 @@ def claim_material():
                     }
                 })
             
-            url_match = re.search(r'https?://[^\s]+', xhs_link)
-            clean_url = url_match.group(0) if url_match else xhs_link
+            url_match = re.search(r'https?://[a-zA-Z0-9_\-\.\/\?=&%#]+', xhs_link)
+            clean_url = url_match.group(0).rstrip('。，、！？') if url_match else xhs_link.strip()
             
             cursor.execute('SELECT id, user_name, submitted_at FROM submissions WHERE xhs_link = ?', (clean_url,))
             existing_sub = cursor.fetchone()
