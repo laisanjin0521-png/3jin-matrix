@@ -178,7 +178,7 @@ def scan_and_import_materials_from_folder():
                         copy_text = tf.read().strip()
                 except Exception:
                     pass
-            elif any(f_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+            elif any(f_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp', '.heic', '.mov', '.mp4', '.gif']):
                 img_files.append(f)
         
         def img_sort_key(name):
@@ -237,12 +237,18 @@ def download_zip():
                 try:
                     header, encoded = img_ref.split(',', 1)
                     img_data = base64.b64decode(encoded)
-                    ext = 'png' if 'png' in header else 'jpg'
+                    ext = 'png'
+                    if 'jpeg' in header or 'jpg' in header: ext = 'jpg'
+                    elif 'heic' in header: ext = 'heic'
+                    elif 'mov' in header: ext = 'mov'
+                    elif 'mp4' in header: ext = 'mp4'
+                    elif 'gif' in header: ext = 'gif'
                     zf.writestr(f"图{idx+1}_配图.{ext}", img_data)
                 except:
                     pass
             elif os.path.exists(img_ref):
-                zf.write(img_ref, f"图{idx+1}_{os.path.basename(img_ref)}")
+                ext = os.path.splitext(img_ref)[1]
+                zf.write(img_ref, f"图{idx+1}_配图{ext}")
         if copy_text:
             zf.writestr('发布文案.txt', copy_text)
             
@@ -340,7 +346,6 @@ def claim_material():
     user = cursor.fetchone()
     current_mat_id = user['current_material_id'] if user else None
     
-    # If user currently has an assigned task, verify link and check matching
     if current_mat_id:
         cursor.execute('SELECT * FROM materials WHERE id = ?', (current_mat_id,))
         curr_mat = cursor.fetchone()
@@ -364,7 +369,6 @@ def claim_material():
             url_match = re.search(r'https?://[^\s]+', xhs_link)
             clean_url = url_match.group(0) if url_match else xhs_link
             
-            # Anti-duplicate link check
             cursor.execute('SELECT id, user_name, submitted_at FROM submissions WHERE xhs_link = ?', (clean_url,))
             existing_sub = cursor.fetchone()
             if existing_sub:
@@ -374,7 +378,6 @@ def claim_material():
                     'error': f'⚠️ 该小红书链接已被提交打卡过（提交人：{existing_sub["user_name"]}），请勿使用重复链接！'
                 })
             
-            # Automated Tag & Content Detection
             expected_tag = curr_mat['last_tag'] or extract_last_tag(curr_mat['copy_text'])
             is_valid_link, err_msg, xhs_title, matched, check_status = auto_detect_xhs_link_with_tag(clean_url, expected_tag, curr_mat['title'])
             if not is_valid_link:
@@ -394,7 +397,6 @@ def claim_material():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')
             """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str))
             
-            # Anti-Reuse Engine: Mark as permanently completed or auto-delete if enabled
             auto_delete = get_setting('auto_delete_consumed', '0') == '1'
             if auto_delete:
                 cursor.execute('DELETE FROM materials WHERE id = ?', (curr_mat['id'],))
@@ -407,7 +409,6 @@ def claim_material():
             WHERE name = ?
             """, (now_str, user_name))
             
-    # Check if reached daily limit
     if today_submitted >= daily_limit:
         conn.commit()
         conn.close()
@@ -417,7 +418,6 @@ def claim_material():
             'error': f'🛑 你今天已成功打卡 {today_submitted} 篇，已达到单日领料上限（{daily_limit} 篇/天）！小红书单号频繁发帖易被平台限流，请明天再来领取~'
         })
         
-    # Check cool-down interval
     cooldown_min = int(get_setting('cooldown_minutes', '0'))
     if cooldown_min > 0:
         cursor.execute('SELECT submitted_at FROM submissions WHERE user_name = ? ORDER BY id DESC LIMIT 1', (user_name,))
@@ -435,7 +435,6 @@ def claim_material():
                     'error': f'⏳ 小红书养号防封保护：距离上一篇发布还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
                 })
     
-    # Pick next available material (Strictly NEVER reuse already assigned/completed ones!)
     cursor.execute('SELECT * FROM materials WHERE status = "available" ORDER BY id ASC LIMIT 1')
     next_mat = cursor.fetchone()
     
@@ -448,7 +447,6 @@ def claim_material():
             'no_more': True
         })
         
-    # Mark strictly as assigned (Locked exclusively to this worker!)
     cursor.execute("""
     UPDATE materials SET status = "assigned", assigned_to = ?, assigned_at = ? WHERE id = ?
     """, (user_name, now_str, next_mat['id']))
@@ -542,7 +540,7 @@ def admin_settings():
 
 @app.route('/api/admin/materials/add', methods=['POST'])
 def admin_add_material():
-    """Web-based material uploader from mobile or desktop browser."""
+    """3 separate image slots or batch array support."""
     admin_pwd = request.headers.get('X-Admin-Password', '')
     real_pwd = get_setting('admin_password', '060521').strip()
     if admin_pwd != real_pwd:
@@ -551,14 +549,24 @@ def admin_add_material():
     data = request.json or {}
     group_name = data.get('group_name', '').strip()
     copy_text = data.get('copy_text', '').strip()
-    images = data.get('images', []) # list of base64 data URIs
+    img1 = data.get('img1', '')
+    img2 = data.get('img2', '')
+    img3 = data.get('img3', '')
+    images = data.get('images', [])
     
+    final_images = []
+    if img1: final_images.append(img1)
+    if img2: final_images.append(img2)
+    if img3: final_images.append(img3)
+    if not final_images and images:
+        final_images = images
+
     if not group_name:
         return jsonify({'success': False, 'error': '请输入素材组名/标题！'})
     if not copy_text:
         return jsonify({'success': False, 'error': '请填写发布文案！'})
-    if not images or len(images) == 0:
-        return jsonify({'success': False, 'error': '请至少上传 1~3 张配图！'})
+    if len(final_images) == 0:
+        return jsonify({'success': False, 'error': '请至少在图1(封面)上传配图！'})
         
     title = group_name
     first_line = copy_text.split('\n')[0].strip()
@@ -574,7 +582,7 @@ def admin_add_material():
         cursor.execute("""
         INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
         VALUES (?, ?, 'cloud_upload', ?, ?, ?, 'available', ?)
-        """, (group_name, title, json.dumps(images, ensure_ascii=False), copy_text, last_tag, now_str))
+        """, (group_name, title, json.dumps(final_images, ensure_ascii=False), copy_text, last_tag, now_str))
         conn.commit()
         conn.close()
         return jsonify({'success': True, 'message': f'🎉 素材【{group_name}】已成功加入素材池！'})
@@ -894,7 +902,7 @@ INDEX_HTML = """
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">素材库管理 · 在线加新素材 · 彻底防复用</p>
+                        <p class="text-xs text-slate-400">3个独立实况上传口 · 团队协同 · 彻底防复用</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -919,40 +927,86 @@ INDEX_HTML = """
                     </div>
                 </div>
 
-                <!-- ADD NEW MATERIAL ACCORDION / CARD -->
-                <div class="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200/80 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="font-bold text-xs text-emerald-900 flex items-center space-x-1.5 uppercase tracking-wider">
-                            <span>➕</span>
-                            <span>直接在后台添加新素材 (手机/电脑均可上传)</span>
-                        </h3>
-                        <span class="text-[10px] text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded font-semibold">即时入库</span>
+                <!-- 3 SEPARATE IMAGE UPLOAD PORTS FORM -->
+                <div class="p-4 bg-emerald-50/80 rounded-2xl border border-emerald-200 space-y-4">
+                    <div class="flex items-center justify-between border-b border-emerald-200/60 pb-2.5">
+                        <div class="flex items-center space-x-1.5">
+                            <span class="text-lg">📸</span>
+                            <h3 class="font-bold text-xs text-emerald-900 uppercase tracking-wider">
+                                团队协同上传：3 张图独立实况/图片上传口
+                            </h3>
+                        </div>
+                        <span class="text-[10px] text-emerald-800 bg-emerald-200/80 px-2 py-0.5 rounded font-bold">支持实况/视频/图片</span>
                     </div>
 
-                    <div class="space-y-2.5 text-xs">
+                    <div class="space-y-3 text-xs">
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">1. 素材组名 / 标题：</label>
-                            <input type="text" id="newGroupInput" placeholder="例如: 第13组_实体商家获客新思路" 
-                                class="w-full px-3 py-2 bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium">
+                            <label class="block font-semibold text-slate-700 mb-1">作品组名 / 标题：</label>
+                            <input type="text" id="newGroupInput" placeholder="例如: 第13组_8年单干老手聊聊代运营" 
+                                class="w-full px-3 py-2 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-xs">
+                        </div>
+
+                        <!-- 3 SEPARATE UPLOAD SLOTS -->
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <!-- Slot 1: Cover -->
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 transition space-y-2 flex flex-col justify-between">
+                                <div>
+                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
+                                        <span class="text-emerald-700">🖼️ 图1 · 封面图</span>
+                                        <span class="text-[10px] text-red-500 bg-red-50 px-1.5 py-0.5 rounded">必填</span>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400">实况动图 / 封面原图</p>
+                                </div>
+                                <input type="file" id="slot1File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(1)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
+                                <div id="slot1Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                    待选图1
+                                </div>
+                            </div>
+
+                            <!-- Slot 2: Content -->
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-blue-300 hover:border-blue-500 transition space-y-2 flex flex-col justify-between">
+                                <div>
+                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
+                                        <span class="text-blue-700">🖼️ 图2 · 内容图</span>
+                                        <span class="text-[10px] text-blue-500 bg-blue-50 px-1.5 py-0.5 rounded">选填</span>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400">正文详情实况 / 图表</p>
+                                </div>
+                                <input type="file" id="slot2File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(2)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
+                                <div id="slot2Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                    待选图2
+                                </div>
+                            </div>
+
+                            <!-- Slot 3: Tail image -->
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-amber-300 hover:border-amber-500 transition space-y-2 flex flex-col justify-between">
+                                <div>
+                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
+                                        <span class="text-amber-700">🖼️ 图3 · 尾图</span>
+                                        <span class="text-[10px] text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded">选填</span>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400">引导转化 / 尾图</p>
+                                </div>
+                                <input type="file" id="slot3File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(3)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-amber-600 file:text-white cursor-pointer">
+                                <div id="slot3Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                    待选图3
+                                </div>
+                            </div>
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">2. 选择发布配图 (1~3 张，按顺序上传)：</label>
-                            <input type="file" id="newImagesInput" multiple accept="image/*" 
-                                class="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
-                            <div id="imagePreviewContainer" class="flex gap-2 mt-2 hidden"></div>
-                        </div>
-
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 粘贴发布文案 (第一行自动作为笔记标题，尾部带 Tag)：</label>
-                            <textarea id="newCopyInput" rows="4" placeholder="粘贴完整文案... 尾部请附带 #行业代运营 等标签" 
-                                class="w-full p-2.5 bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs"></textarea>
+                            <label class="block font-semibold text-slate-700 mb-1">发布文案 (第一行自动作为标题，末尾附带 #城市代运营 等Tag)：</label>
+                            <textarea id="newCopyInput" rows="3" placeholder="粘贴文案内容..." 
+                                class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs"></textarea>
                         </div>
                     </div>
 
                     <div class="flex justify-end pt-1">
-                        <button onclick="submitNewMaterial()" id="addMatBtn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1">
-                            <span>💾 立即加入素材池</span>
+                        <button onclick="submit3SlotsMaterial()" id="add3SlotsBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
+                            <span>🚀 确认保存并派入素材池</span>
                         </button>
                     </div>
                 </div>
@@ -1386,38 +1440,57 @@ INDEX_HTML = """
             }
         }
 
-        async function submitNewMaterial() {
+        async function previewSlot(slotNum) {
+            const input = document.getElementById(`slot${slotNum}File`);
+            const preview = document.getElementById(`slot${slotNum}Preview`);
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.innerHTML = `<img src="${e.target.result}" class="w-full h-full object-cover">`;
+                };
+                reader.readAsDataURL(file);
+            } else {
+                preview.innerHTML = `待选图${slotNum}`;
+            }
+        }
+
+        async function fileToBase64(file) {
+            if (!file) return '';
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function submit3SlotsMaterial() {
             const group_name = document.getElementById('newGroupInput').value.trim();
             const copy_text = document.getElementById('newCopyInput').value.trim();
-            const files = document.getElementById('newImagesInput').files;
+            const f1 = document.getElementById('slot1File').files[0];
+            const f2 = document.getElementById('slot2File').files[0];
+            const f3 = document.getElementById('slot3File').files[0];
 
             if (!group_name) {
-                showToast('请输入素材组名/标题！');
+                showToast('请输入作品组名/标题！');
                 return;
             }
             if (!copy_text) {
-                showToast('请填写文案内容！');
+                showToast('请填写发布文案！');
                 return;
             }
-            if (files.length === 0) {
-                showToast('请至少选择 1 张配图！');
+            if (!f1) {
+                showToast('请在【图1 · 封面图】上传封面配图！');
                 return;
             }
 
-            const btn = document.getElementById('addMatBtn');
-            btn.innerHTML = '<span>⏳ 正在上传入库...</span>';
+            const btn = document.getElementById('add3SlotsBtn');
+            btn.innerHTML = '<span>⏳ 正在保存入库...</span>';
             btn.disabled = true;
 
-            const base64Images = [];
-            for (let i = 0; i < files.length; i++) {
-                const f = files[i];
-                const b64 = await new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.readAsDataURL(f);
-                });
-                base64Images.push(b64);
-            }
+            const b64_1 = await fileToBase64(f1);
+            const b64_2 = await fileToBase64(f2);
+            const b64_3 = await fileToBase64(f3);
 
             try {
                 const res = await fetch('/api/admin/materials/add', {
@@ -1429,7 +1502,9 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         group_name: group_name,
                         copy_text: copy_text,
-                        images: base64Images
+                        img1: b64_1,
+                        img2: b64_2,
+                        img3: b64_3
                     })
                 });
                 const data = await res.json();
@@ -1437,15 +1512,20 @@ INDEX_HTML = """
                     showToast(data.message);
                     document.getElementById('newGroupInput').value = '';
                     document.getElementById('newCopyInput').value = '';
-                    document.getElementById('newImagesInput').value = '';
+                    document.getElementById('slot1File').value = '';
+                    document.getElementById('slot2File').value = '';
+                    document.getElementById('slot3File').value = '';
+                    document.getElementById('slot1Preview').innerHTML = '待选图1';
+                    document.getElementById('slot2Preview').innerHTML = '待选图2';
+                    document.getElementById('slot3Preview').innerHTML = '待选图3';
                     loadAdminData();
                 } else {
                     showToast(data.error);
                 }
             } catch (err) {
-                showToast('上传素材失败');
+                showToast('上传失败');
             } finally {
-                btn.innerHTML = '<span>💾 立即加入素材池</span>';
+                btn.innerHTML = '<span>🚀 确认保存并派入素材池</span>';
                 btn.disabled = false;
             }
         }
