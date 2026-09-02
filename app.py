@@ -7,21 +7,14 @@ import sqlite3
 import datetime
 import zipfile
 import mimetypes
-import hashlib
 import urllib.request
+import urllib.error
 from flask import Flask, request, jsonify, send_file, render_template_string, Response, make_response
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
 
 app = Flask(__name__)
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.db')
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MATERIALS_DIR = os.path.join(PROJECT_ROOT, 'materials')
-THUMB_CACHE_DIR = os.path.join(PROJECT_ROOT, '.thumbs_cache')
-os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -59,7 +52,11 @@ def init_db():
         check_status TEXT DEFAULT 'matched',
         submitted_at TEXT,
         status TEXT DEFAULT 'verified',
-        note TEXT
+        note TEXT,
+        settlement_status TEXT DEFAULT 'unsettled',
+        settled_at TEXT,
+        last_inspected_at TEXT,
+        survival_status TEXT DEFAULT 'pending'
     )
     """)
     cursor.execute("""
@@ -77,11 +74,25 @@ def init_db():
     )
     """)
     
+    # Safe column migration
+    cursor.execute("PRAGMA table_info(submissions)")
+    cols = [r[1] for r in cursor.fetchall()]
+    new_cols = [
+        ('settlement_status', "TEXT DEFAULT 'unsettled'"),
+        ('settled_at', "TEXT"),
+        ('last_inspected_at', "TEXT"),
+        ('survival_status', "TEXT DEFAULT 'pending'")
+    ]
+    for c_name, c_type in new_cols:
+        if c_name not in cols:
+            cursor.execute(f"ALTER TABLE submissions ADD COLUMN {c_name} {c_type}")
+
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[\"y\", \"小明\", \"小红\"]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('claim_timeout_hours', '2')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '1')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_delete_consumed', '0')")
@@ -103,6 +114,35 @@ def set_setting(key, value):
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+
+def auto_release_expired_assignments():
+    try:
+        timeout_hours = float(get_setting('claim_timeout_hours', '2'))
+        if timeout_hours <= 0:
+            return 0
+        conn = get_db()
+        cursor = conn.cursor()
+        now_dt = datetime.datetime.now()
+        
+        cursor.execute("SELECT id, group_name, assigned_to, assigned_at FROM materials WHERE status = 'assigned'")
+        assigned_mats = cursor.fetchall()
+        released_count = 0
+        for mat in assigned_mats:
+            if mat['assigned_at']:
+                try:
+                    assigned_dt = datetime.datetime.strptime(mat['assigned_at'], '%Y-%m-%d %H:%M:%S')
+                    if (now_dt - assigned_dt).total_seconds() > (timeout_hours * 3600):
+                        cursor.execute("UPDATE materials SET status = 'available', assigned_to = NULL, assigned_at = NULL WHERE id = ?", (mat['id'],))
+                        if mat['assigned_to']:
+                            cursor.execute("UPDATE users SET current_material_id = NULL WHERE name = ?", (mat['assigned_to'],))
+                        released_count += 1
+                except Exception:
+                    pass
+        conn.commit()
+        conn.close()
+        return released_count
+    except Exception:
+        return 0
 
 def extract_last_tag(copy_text):
     if not copy_text:
@@ -288,7 +328,6 @@ def download_zip():
 @app.route('/api/image')
 def serve_image():
     path = request.args.get('path', '')
-    is_thumb = request.args.get('thumb', '0') == '1'
     if not path:
         return 'Image not found', 404
         
@@ -308,25 +347,6 @@ def serve_image():
     if not real_path or not os.path.exists(real_path):
         return 'Image not found', 404
 
-    # High-speed WebP Thumbnail Generator for Web Preview
-    if is_thumb and PIL_AVAILABLE:
-        try:
-            ext = os.path.splitext(real_path)[1].lower()
-            if ext in ('.png', '.jpg', '.jpeg', '.webp'):
-                cache_key = hashlib.md5(f"{real_path}_{os.path.getmtime(real_path)}".encode()).hexdigest()
-                thumb_file = os.path.join(THUMB_CACHE_DIR, f"{cache_key}.webp")
-                if not os.path.exists(thumb_file):
-                    with Image.open(real_path) as im:
-                        im.thumbnail((750, 1000), Image.Resampling.LANCZOS)
-                        if im.mode in ('RGBA', 'P'):
-                            im = im.convert('RGB')
-                        im.save(thumb_file, 'WEBP', quality=82)
-                resp = make_response(send_file(thumb_file, mimetype='image/webp'))
-                resp.headers['Cache-Control'] = 'public, max-age=604800'
-                return resp
-        except Exception:
-            pass
-
     mime, _ = mimetypes.guess_type(real_path)
     resp = make_response(send_file(real_path, mimetype=mime or 'image/jpeg'))
     resp.headers['Cache-Control'] = 'public, max-age=604800'
@@ -334,6 +354,7 @@ def serve_image():
 
 @app.route('/api/user/status', methods=['GET'])
 def get_user_status():
+    auto_release_expired_assignments()
     name = request.args.get('name', '').strip()
     passcode = request.args.get('passcode', '').strip()
     if not name:
@@ -387,6 +408,7 @@ def get_user_status():
 
 @app.route('/api/claim', methods=['POST'])
 def claim_material():
+    auto_release_expired_assignments()
     data = request.json or {}
     user_name = data.get('user_name', '').strip()
     passcode = data.get('passcode', '').strip()
@@ -460,8 +482,8 @@ def claim_material():
                 })
             
             cursor.execute("""
-            INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')
+            INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, settlement_status, survival_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'unsettled', 'pending')
             """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str))
             
             auto_delete = get_setting('auto_delete_consumed', '0') == '1'
@@ -571,6 +593,8 @@ def admin_settings():
             set_setting('auth_mode', data['auth_mode'])
         if 'daily_limit' in data:
             set_setting('daily_limit', str(int(data['daily_limit'])))
+        if 'claim_timeout_hours' in data:
+            set_setting('claim_timeout_hours', str(float(data['claim_timeout_hours'])))
         if 'cooldown_minutes' in data:
             set_setting('cooldown_minutes', str(int(data['cooldown_minutes'])))
         if 'strict_tag_check' in data:
@@ -598,12 +622,92 @@ def admin_settings():
         'passcode': get_setting('passcode', '8888'),
         'auth_mode': get_setting('auth_mode', 'passcode'),
         'daily_limit': get_setting('daily_limit', '3'),
+        'claim_timeout_hours': get_setting('claim_timeout_hours', '2'),
         'cooldown_minutes': get_setting('cooldown_minutes', '0'),
         'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
         'auto_delete_consumed': get_setting('auto_delete_consumed', '0') == '1',
         'admin_password': get_setting('admin_password', '060521'),
         'whitelist': whitelist
     })
+
+@app.route('/api/admin/submissions/toggle_settlement', methods=['POST'])
+def admin_toggle_settlement():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+        
+    data = request.json or {}
+    sub_id = data.get('id')
+    new_status = data.get('status')
+    if not sub_id:
+        return jsonify({'success': False, 'error': 'Missing sub_id'})
+        
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE submissions SET settlement_status = ?, settled_at = ? WHERE id = ?
+    """, (new_status, now_str if new_status == 'settled' else None, sub_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'settlement_status': new_status, 'message': f'状态已更新为【{"已结算" if new_status == "settled" else "未结算"}】'})
+
+@app.route('/api/admin/submissions/inspect_survival', methods=['POST'])
+def admin_inspect_survival():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+        
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, xhs_link, submitted_at FROM submissions ORDER BY id DESC")
+    rows = cursor.fetchall()
+    
+    inspected_count = 0
+    dead_count = 0
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'}
+    
+    for r in rows:
+        url = r['xhs_link']
+        clean_url_m = re.search(r'https?://[a-zA-Z0-9_\-\.\/\?=&%#]+', url)
+        clean_url = clean_url_m.group(0) if clean_url_m else url
+        survival = 'active'
+        try:
+            req = urllib.request.Request(clean_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+                if any(kw in html for kw in ['该笔记不存在', '已被删除', '内容已删除', '无法查看', '笔记找不到了']):
+                    survival = 'dead'
+                    dead_count += 1
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                survival = 'dead'
+                dead_count += 1
+        except Exception:
+            pass
+            
+        cursor.execute("UPDATE submissions SET survival_status = ?, last_inspected_at = ? WHERE id = ?", (survival, now_str, r['id']))
+        inspected_count += 1
+        
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'success': True, 
+        'message': f'✅ 存活巡检完成！共巡检 {inspected_count} 篇，正常存活 {inspected_count - dead_count} 篇，已失效/删除 {dead_count} 篇。',
+        'dead_count': dead_count
+    })
+
+@app.route('/api/admin/materials/release_expired', methods=['POST'])
+def admin_release_expired():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    count = auto_release_expired_assignments()
+    return jsonify({'success': True, 'message': f'已成功释放 {count} 组超时的素材，退回素材池！'})
 
 @app.route('/api/admin/materials/add', methods=['POST'])
 def admin_add_material():
@@ -745,6 +849,7 @@ def admin_clear_completed():
 
 @app.route('/api/admin/stats', methods=['GET'])
 def admin_stats():
+    auto_release_expired_assignments()
     admin_pwd = request.headers.get('X-Admin-Password', '')
     real_pwd = get_setting('admin_password', '060521').strip()
     if admin_pwd != real_pwd:
@@ -762,6 +867,8 @@ def admin_stats():
     completed = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM submissions')
     total_submissions = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM submissions WHERE settlement_status = "settled"')
+    settled_submissions = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM users')
     total_users = cursor.fetchone()[0]
     
@@ -783,6 +890,8 @@ def admin_stats():
             'assigned': assigned,
             'completed': completed,
             'total_submissions': total_submissions,
+            'settled_submissions': settled_submissions,
+            'unsettled_submissions': total_submissions - settled_submissions,
             'total_users': total_users
         },
         'materials': materials_list,
@@ -803,19 +912,21 @@ def admin_sync():
 def export_csv():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, user_name, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status FROM submissions ORDER BY id DESC')
+    cursor.execute('SELECT id, user_name, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, settlement_status, settled_at, survival_status, last_inspected_at FROM submissions ORDER BY id DESC')
     rows = cursor.fetchall()
     conn.close()
     
-    csv_content = "\ufeffID,分发人员姓名,领取作品组名,小红书发布链接,抓取标题,文案核验Tag,Tag核验结果,系统质检状态,提交打卡时间,核验状态\n"
+    csv_content = "\ufeffID,分发人员姓名,领取作品组名,结算状态,结算时间,24h存活状态,小红书发布链接,抓取标题,文案核验Tag,Tag核验结果,打卡时间\n"
     for r in rows:
         t_str = r["xhs_title"] if r["xhs_title"] else "-"
         tag_str = r["tag_expected"] if r["tag_expected"] else "-"
         match_str = "已匹配Tag" if r["tag_matched"] == 1 else "未检测到Tag"
-        c_str = r["check_status"] if r["check_status"] else "-"
-        csv_content += f'"{r["id"]}","{r["user_name"]}","{r["material_name"]}","{r["xhs_link"]}","{t_str}","{tag_str}","{match_str}","{c_str}","{r["submitted_at"]}","{r["status"]}"\n'
+        settle_str = "已结算" if r["settlement_status"] == "settled" else "未结算"
+        settle_t = r["settled_at"] if r["settled_at"] else "-"
+        surv_str = "正常存活" if r["survival_status"] == "active" else "已被删/失效" if r["survival_status"] == "dead" else "待巡检"
+        csv_content += f'"{r["id"]}","{r["user_name"]}","{r["material_name"]}","{settle_str}","{settle_t}","{surv_str}","{r["xhs_link"]}","{t_str}","{tag_str}","{match_str}","{r["submitted_at"]}"\n'
         
-    filename = f"小红书矩阵打卡统计_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"小红书矩阵打卡与结算总账_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     return Response(
         csv_content,
         mimetype="text/csv",
@@ -917,12 +1028,12 @@ INDEX_HTML = """
                         <span>⏳ 当前进行中任务：<span id="activeGroupName" class="text-blue-700"></span></span>
                         <span class="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-bold">待回传链接</span>
                     </div>
-                    <p class="mt-1.5 text-slate-600 leading-relaxed">小红书发布完成后，复制该作品的<strong>分享链接</strong>粘贴在下方，即可提交打卡并领取下一组新素材！</p>
+                    <p class="mt-1.5 text-slate-600 leading-relaxed">在小红书发帖后，直接<strong>复制整段分享口令</strong>长按粘贴在下方（系统会自动提取核心链接并核验），即可领取下一组！</p>
                 </div>
 
                 <div>
-                    <label class="block text-xs font-semibold text-slate-700 mb-1">粘贴小红书已发布笔记链接：</label>
-                    <textarea id="xhsLinkInput" rows="2" placeholder="长按粘贴小红书笔记分享链接 (例如: http://xhslink.com/... 或完整分享文本)"
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">粘贴小红书已发布笔记分享口令/链接：</label>
+                    <textarea id="xhsLinkInput" rows="2" placeholder="长按直接粘贴小红书复制的整段分享口令 (例如: 00年个人接... https://xhslink.cn/...)"
                         class="w-full p-3 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"></textarea>
                 </div>
 
@@ -970,15 +1081,18 @@ INDEX_HTML = """
                 </div>
             </div>
 
-            <!-- Rules Reminder Card -->
-            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-1.5">
-                <div class="font-bold text-slate-800 flex items-center space-x-1">
-                    <span>⚠️</span>
-                    <span>发布规范与客户引流指引</span>
+            <!-- STRICT SOP CARD FOR WORKERS (Anti-ban & Customer Traffic) -->
+            <div class="p-4 bg-rose-50/80 rounded-2xl border border-rose-200 text-xs text-rose-950 space-y-2">
+                <div class="font-bold text-rose-900 flex items-center space-x-1.5 text-xs">
+                    <span>🔥</span>
+                    <span>小红书发布规范与引流防封 SOP 铁律</span>
                 </div>
-                <p>1. <strong>发布顺序</strong>：图片必须按 图1(封面)、图2(内容)、图3(尾图) 顺序选择上传；</p>
-                <p>2. <strong>客户留资</strong>：有人在评论区留言时，先回“已私”，然后在私信发引导视频；</p>
-                <p>3. <strong>提成结算</strong>：客户成功添加微信后，截图发给 3金 当天结算！</p>
+                <div class="space-y-1 text-[11px] leading-relaxed text-rose-900">
+                    <p>1. <strong>发布顺序</strong>：严格按【图1·封面 ➔ 图2·内容 ➔ 图3·尾图】顺序发布；</p>
+                    <p>2. <strong>评论区互动</strong>：有客户在评论区留言咨询时，统一回复“<strong>已私</strong>”，<strong>严禁在评论区直接发微信号或手机号</strong>（会被小红书直接禁言）；</p>
+                    <p>3. <strong>私信引流技巧</strong>：在私信中发送事先准备好的引导视频/主页背景图引导，切勿硬发纯文字微信号；</p>
+                    <p>4. <strong>提成结算</strong>：客户成功添加微信后，截图发给 3金 当天结算高额提成！</p>
+                </div>
             </div>
         </div>
 
@@ -986,7 +1100,7 @@ INDEX_HTML = """
         <div id="historyCard" class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 hidden">
             <h3 class="font-bold text-sm text-slate-900 mb-3 flex items-center space-x-1.5">
                 <span>📑</span>
-                <span>我的打卡记录</span>
+                <span>我的打卡记录与结算状态</span>
             </h3>
             <div class="space-y-2 text-xs" id="historyList">
             </div>
@@ -1015,14 +1129,14 @@ INDEX_HTML = """
 
     <!-- Admin Dashboard Modal -->
     <div id="adminModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
-        <div class="bg-white rounded-2xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+        <div class="bg-white rounded-2xl max-w-4xl w-full max-h-[94vh] flex flex-col shadow-2xl overflow-hidden">
             <!-- Modal Header -->
             <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
                 <div class="flex items-center space-x-2">
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">白名单标签管理 · 批量拼装 · 团队协同</p>
+                        <p class="text-xs text-slate-400">白名单标签 · 24h存活巡检 · 结算台账 · 超时释放</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -1032,18 +1146,22 @@ INDEX_HTML = """
             <div class="p-5 overflow-y-auto space-y-5 flex-1">
                 
                 <!-- Stat Cards -->
-                <div class="grid grid-cols-3 gap-3">
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
-                        <div class="text-xs text-slate-500 font-medium">总素材组数</div>
+                        <div class="text-[11px] text-slate-500 font-medium">总素材组数</div>
                         <div class="text-xl font-bold text-slate-900 mt-0.5" id="statTotal">0</div>
                     </div>
                     <div class="bg-emerald-50 p-3 rounded-xl border border-emerald-100 text-center">
-                        <div class="text-xs text-emerald-700 font-medium">剩余待领 (独家)</div>
+                        <div class="text-[11px] text-emerald-700 font-medium">剩余待领 (独家)</div>
                         <div class="text-xl font-bold text-emerald-600 mt-0.5" id="statAvailable">0</div>
                     </div>
+                    <div class="bg-amber-50 p-3 rounded-xl border border-amber-100 text-center">
+                        <div class="text-[11px] text-amber-700 font-medium">⏳ 待结算篇数</div>
+                        <div class="text-xl font-bold text-amber-600 mt-0.5" id="statUnsettled">0</div>
+                    </div>
                     <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
-                        <div class="text-xs text-blue-700 font-medium">已消耗作废</div>
-                        <div class="text-xl font-bold text-blue-600 mt-0.5" id="statCompleted">0</div>
+                        <div class="text-[11px] text-blue-700 font-medium">✅ 已结算打卡</div>
+                        <div class="text-xl font-bold text-blue-600 mt-0.5" id="statSettled">0</div>
                     </div>
                 </div>
 
@@ -1054,38 +1172,35 @@ INDEX_HTML = """
                             <span>🛡️</span>
                             <span>兼职白名单与防作弊规则管理</span>
                         </h3>
-                        <span class="text-[10px] text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded font-bold">可点选 + 增删</span>
+                        <div class="flex items-center space-x-2">
+                            <button onclick="releaseExpiredAssignments()" class="text-[10px] bg-amber-200 hover:bg-amber-300 text-amber-900 px-2 py-0.5 rounded font-bold transition">
+                                🔄 立即释放超时领料
+                            </button>
+                            <span class="text-[10px] text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded font-bold">可点选 + 增删</span>
+                        </div>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">1. 兼职领料验证模式：</label>
-                            <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
-                                <option value="passcode">🔑 仅验证口令 (默认: 知道口令就能领，名字自由填)</option>
-                                <option value="whitelist">📋 仅验证白名单 (名字必须在下方标签列表内)</option>
-                                <option value="both">🔒 双重验证 (必须在白名单 且 口令正确，最严格)</option>
-                                <option value="none">🌐 开放模式 (免验证，任意领)</option>
+                            <label class="block font-semibold text-slate-700 mb-1">1. 领料验证模式：</label>
+                            <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
+                                <option value="passcode">🔑 仅验证口令 (默认)</option>
+                                <option value="whitelist">📋 仅验证白名单</option>
+                                <option value="both">🔒 双重验证 (最严格)</option>
+                                <option value="none">🌐 开放模式</option>
                             </select>
                         </div>
 
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">2. 统一领料口令：</label>
                             <input type="text" id="settingPasscode" placeholder="如: 8888" 
-                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 每日单人领料上限 (篇/天)：</label>
-                            <input type="number" id="settingDailyLimit" min="1" max="20" placeholder="如: 3" 
-                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
-                        </div>
-
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">4. 已发作品防复用策略：</label>
-                            <select id="settingAutoDelete" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
-                                <option value="0">标记为【已消耗】(保留记录，绝不再派发任何人)</option>
-                                <option value="1">打卡后【立即自动物理销毁】(完全不留痕迹)</option>
-                            </select>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 领料超时自动退回 (小时)：</label>
+                            <input type="number" id="settingTimeoutHours" step="0.5" min="0.5" max="24" placeholder="如: 2" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
                     </div>
 
@@ -1093,7 +1208,7 @@ INDEX_HTML = """
                     <div class="pt-2 border-t border-amber-200/60 space-y-2">
                         <div class="flex items-center justify-between">
                             <label class="block font-semibold text-slate-700 text-xs">
-                                5. 已授权兼职人员标签列表（点击 ✕ 即可删除）：
+                                4. 已授权兼职人员标签列表（点击 ✕ 即可删除）：
                             </label>
                             <span class="text-[10px] text-amber-700 font-bold" id="whitelistCountBadge">当前 0 人</span>
                         </div>
@@ -1271,7 +1386,7 @@ INDEX_HTML = """
                             🗑️ 一键清空所有已消耗素材
                         </button>
                     </div>
-                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-56 overflow-y-auto">
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-52 overflow-y-auto">
                         <table class="w-full text-xs text-left border-collapse">
                             <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
                                 <tr>
@@ -1290,24 +1405,32 @@ INDEX_HTML = """
                     </div>
                 </div>
 
-                <!-- Recent Submissions Table -->
+                <!-- Recent Submissions Table & Settlement Ledger -->
                 <div>
-                    <div class="flex items-center justify-between mb-2">
-                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider">📋 实时打卡审核表：</h3>
-                        <a href="/api/admin/export_csv" class="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold">
-                            📥 导出 Excel 统计表
-                        </a>
+                    <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider flex items-center space-x-1.5">
+                            <span>📋</span>
+                            <span>实时打卡审核与结算台账：</span>
+                        </h3>
+                        <div class="flex items-center space-x-2">
+                            <button onclick="inspectSurvivalStatus()" id="inspectBtn" class="text-[11px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1">
+                                <span>🔍 24h存活巡检</span>
+                            </button>
+                            <a href="/api/admin/export_csv" class="text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1">
+                                <span>📥 导出 Excel 账单</span>
+                            </a>
+                        </div>
                     </div>
-                    <div class="border border-slate-200 rounded-xl overflow-hidden">
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
                         <table class="w-full text-xs text-left border-collapse">
                             <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
                                 <tr>
-                                    <th class="p-2.5">时间</th>
-                                    <th class="p-2.5">人员</th>
-                                    <th class="p-2.5">领取组名</th>
-                                    <th class="p-2.5">文案尾Tag</th>
-                                    <th class="p-2.5">小红书链接</th>
-                                    <th class="p-2.5">质检</th>
+                                    <th class="p-2">打卡时间</th>
+                                    <th class="p-2">人员</th>
+                                    <th class="p-2">作品组名</th>
+                                    <th class="p-2">小红书链接</th>
+                                    <th class="p-2">24h存活</th>
+                                    <th class="p-2 text-center">结算状态 (点击切换)</th>
                                 </tr>
                             </thead>
                             <tbody id="adminSubmissionsBody" class="divide-y divide-slate-100">
@@ -1423,9 +1546,13 @@ INDEX_HTML = """
                                 🔗 ${item.xhs_link}
                             </a>
                         </div>
-                        <div class="text-right text-[11px] text-slate-400">
+                        <div class="text-right text-[11px] text-slate-400 space-y-1">
                             <div>${item.submitted_at.split(' ')[1]}</div>
-                            <span class="inline-block mt-0.5 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-semibold">已核验</span>
+                            <div>
+                                ${item.settlement_status === 'settled' 
+                                    ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-bold">🟢 已结算提成</span>' 
+                                    : '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded font-bold">⏳ 待结算</span>'}
+                            </div>
                         </div>
                     </div>
                 `).join('');
@@ -1453,13 +1580,11 @@ INDEX_HTML = """
             imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
                 const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
                 const label = labels[idx] || `图${idx+1}`;
-                const thumbUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}&thumb=1`;
-                const fullUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
+                const srcUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
                 return `
                     <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col shadow-sm">
-                        <img src="${thumbUrl}" 
-                             loading="eager"
-                             onclick="previewImg('${fullUrl}')" 
+                        <img src="${srcUrl}" 
+                             onclick="previewImg('${srcUrl}')" 
                              class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
                              alt="${label}">
                         <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
@@ -1485,14 +1610,14 @@ INDEX_HTML = """
             if (isNext) {
                 xhsLink = document.getElementById('xhsLinkInput').value.trim();
                 if (!xhsLink) {
-                    showToast('请粘贴刚刚发布的小红书链接后再提交！');
+                    showToast('请粘贴刚刚发布的小红书分享内容后再提交！');
                     return;
                 }
             }
 
             const btn = document.getElementById('claimBtn');
             if (btn && isNext) {
-                btn.innerHTML = '<span>🔍 正在提交核验...</span>';
+                btn.innerHTML = '<span>🔍 正在智能提取链接并核验...</span>';
                 btn.disabled = true;
             }
 
@@ -1679,8 +1804,7 @@ INDEX_HTML = """
                 if (data.success) {
                     document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
                     document.getElementById('settingPasscode').value = data.passcode || '8888';
-                    document.getElementById('settingDailyLimit').value = data.daily_limit || 3;
-                    document.getElementById('settingAutoDelete').value = data.auto_delete_consumed ? '1' : '0';
+                    document.getElementById('settingTimeoutHours').value = data.claim_timeout_hours || 2;
                     currentWhitelist = Array.isArray(data.whitelist) ? data.whitelist : [];
                     renderWhitelistTags();
                 }
@@ -1690,8 +1814,7 @@ INDEX_HTML = """
         async function saveAdminSettingsSilently() {
             const auth_mode = document.getElementById('settingAuthMode').value;
             const passcode = document.getElementById('settingPasscode').value.trim();
-            const daily_limit = document.getElementById('settingDailyLimit').value.trim();
-            const auto_delete = document.getElementById('settingAutoDelete').value === '1';
+            const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
 
             try {
                 await fetch('/api/admin/settings', {
@@ -1703,8 +1826,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        daily_limit: daily_limit,
-                        auto_delete_consumed: auto_delete,
+                        claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })
                 });
@@ -1714,8 +1836,7 @@ INDEX_HTML = """
         async function saveAdminSettings() {
             const auth_mode = document.getElementById('settingAuthMode').value;
             const passcode = document.getElementById('settingPasscode').value.trim();
-            const daily_limit = document.getElementById('settingDailyLimit').value.trim();
-            const auto_delete = document.getElementById('settingAutoDelete').value === '1';
+            const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1727,8 +1848,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        daily_limit: daily_limit,
-                        auto_delete_consumed: auto_delete,
+                        claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })
                 });
@@ -1740,6 +1860,68 @@ INDEX_HTML = """
                 }
             } catch (err) {
                 showToast('保存设置失败');
+            }
+        }
+
+        async function releaseExpiredAssignments() {
+            try {
+                const res = await fetch('/api/admin/materials/release_expired', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                showToast(data.message);
+                loadAdminData();
+            } catch (err) {
+                showToast('释放失败');
+            }
+        }
+
+        async function toggleSettlement(subId, currentStatus) {
+            const targetStatus = currentStatus === 'settled' ? 'unsettled' : 'settled';
+            try {
+                const res = await fetch('/api/admin/submissions/toggle_settlement', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({ id: subId, status: targetStatus })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    loadAdminData();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('切换结算状态失败');
+            }
+        }
+
+        async function inspectSurvivalStatus() {
+            const btn = document.getElementById('inspectBtn');
+            btn.innerHTML = '<span>⏳ 正在巡检小红书笔记存活...</span>';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/admin/submissions/inspect_survival', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    loadAdminData();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('巡检异常');
+            } finally {
+                btn.innerHTML = '<span>🔍 24h存活巡检</span>';
+                btn.disabled = false;
             }
         }
 
@@ -1949,7 +2131,8 @@ INDEX_HTML = """
                 if (data.success) {
                     document.getElementById('statTotal').innerText = data.stats.total_materials;
                     document.getElementById('statAvailable').innerText = data.stats.available;
-                    document.getElementById('statCompleted').innerText = data.stats.completed;
+                    document.getElementById('statUnsettled').innerText = data.stats.unsettled_submissions || 0;
+                    document.getElementById('statSettled').innerText = data.stats.settled_submissions || 0;
 
                     if (data.workers && data.workers.length > 0) {
                         const quickBox = document.getElementById('quickAddWorkersBox');
@@ -1993,23 +2176,31 @@ INDEX_HTML = """
 
                     const subBody = document.getElementById('adminSubmissionsBody');
                     if (data.submissions.length > 0) {
-                        subBody.innerHTML = data.submissions.map(s => `
-                            <tr class="hover:bg-slate-50">
-                                <td class="p-2.5 text-slate-500 whitespace-nowrap">${s.submitted_at.split(' ')[1]}</td>
-                                <td class="p-2.5 font-bold text-slate-800">${s.user_name}</td>
-                                <td class="p-2.5 text-slate-700 truncate max-w-[100px]">${s.material_name}</td>
-                                <td class="p-2.5 font-mono text-[11px] font-bold text-blue-600">${s.tag_expected || '-'}</td>
-                                <td class="p-2.5">
-                                    <a href="${s.xhs_link}" target="_blank" class="text-red-600 text-[11px] font-semibold hover:underline flex items-center space-x-1 truncate max-w-[130px]">
-                                        <span>🔗 点此核验</span>
-                                    </a>
-                                </td>
-                                <td class="p-2.5 whitespace-nowrap">
-                                    ${s.tag_matched === 1 ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">🟢 匹配</span>' :
-                                      '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">🟡 异常</span>'}
-                                </td>
-                            </tr>
-                        `).join('');
+                        subBody.innerHTML = data.submissions.map(s => {
+                            const isSettled = s.settlement_status === 'settled';
+                            const survStatus = s.survival_status === 'active' ? '<span class="text-emerald-600 font-bold">🟢 正常存活</span>' :
+                                               s.survival_status === 'dead' ? '<span class="text-red-600 font-bold">🔴 已被删/私密</span>' :
+                                               '<span class="text-slate-400">待巡检</span>';
+                            return `
+                                <tr class="hover:bg-slate-50">
+                                    <td class="p-2 text-slate-500 whitespace-nowrap">${s.submitted_at ? s.submitted_at.split(' ')[0].substring(5) + ' ' + s.submitted_at.split(' ')[1].substring(0,5) : '-'}</td>
+                                    <td class="p-2 font-bold text-slate-800">${s.user_name}</td>
+                                    <td class="p-2 text-slate-700 truncate max-w-[110px]" title="${s.material_name}">${s.material_name}</td>
+                                    <td class="p-2">
+                                        <a href="${s.xhs_link}" target="_blank" class="text-red-600 font-semibold hover:underline flex items-center space-x-1 truncate max-w-[110px]">
+                                            <span>🔗 打开笔记</span>
+                                        </a>
+                                    </td>
+                                    <td class="p-2 text-[11px] whitespace-nowrap">${survStatus}</td>
+                                    <td class="p-2 text-center whitespace-nowrap">
+                                        <button onclick="toggleSettlement(${s.id}, '${s.settlement_status || 'unsettled'}')" 
+                                            class="px-2.5 py-1 rounded-full text-[11px] font-bold transition shadow-sm ${isSettled ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300' : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300'}">
+                                            <span>${isSettled ? '🟢 已结算' : '🟡 待结算'}</span>
+                                        </button>
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('');
                     } else {
                         subBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>';
                     }
