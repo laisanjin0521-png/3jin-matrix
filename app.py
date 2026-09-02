@@ -702,6 +702,9 @@ def admin_stats():
     
     cursor.execute('SELECT * FROM submissions ORDER BY id DESC')
     submissions_list = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute('SELECT name, completed_count, last_active FROM users ORDER BY completed_count DESC')
+    all_workers = [dict(r) for r in cursor.fetchall()]
     
     conn.close()
     return jsonify({
@@ -715,7 +718,8 @@ def admin_stats():
             'total_users': total_users
         },
         'materials': materials_list,
-        'submissions': submissions_list
+        'submissions': submissions_list,
+        'workers': all_workers
     })
 
 @app.route('/api/admin/sync', methods=['POST'])
@@ -757,7 +761,6 @@ INDEX_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>小红书矩阵分发 · 凭链接自动领料平台</title>
-    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -883,7 +886,6 @@ INDEX_HTML = """
                     </div>
                 </div>
                 <div class="grid grid-cols-3 gap-2" id="imagesGrid">
-                    <!-- Image Cards populated by JS -->
                 </div>
             </div>
 
@@ -919,7 +921,6 @@ INDEX_HTML = """
                 <span>我的打卡记录</span>
             </h3>
             <div class="space-y-2 text-xs" id="historyList">
-                <!-- History Items -->
             </div>
         </div>
 
@@ -953,7 +954,7 @@ INDEX_HTML = """
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">白名单授权 · 批量拼装 · 团队协同</p>
+                        <p class="text-xs text-slate-400">白名单标签管理 · 批量拼装 · 团队协同</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -978,22 +979,22 @@ INDEX_HTML = """
                     </div>
                 </div>
 
-                <!-- Security, Whitelist & Anti-Cheat Settings Card -->
+                <!-- Security, Tag-based Whitelist & Anti-Cheat Card -->
                 <div class="p-4 bg-amber-50/80 rounded-2xl border border-amber-200 space-y-3.5">
                     <div class="flex items-center justify-between border-b border-amber-200/60 pb-2">
                         <h3 class="font-bold text-xs text-amber-900 flex items-center space-x-1.5 uppercase tracking-wider">
                             <span>🛡️</span>
                             <span>兼职白名单与防作弊规则管理</span>
                         </h3>
-                        <span class="text-[10px] text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded font-bold">即时生效</span>
+                        <span class="text-[10px] text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded font-bold">可点选 + 增删</span>
                     </div>
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">1. 兼职领料验证模式：</label>
-                            <select id="settingAuthMode" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
-                                <option value="passcode">🔑 仅验证口令 (默认: 知道口令就能领，名字随便填)</option>
-                                <option value="whitelist">📋 仅验证白名单 (名字必须在下方白名单内)</option>
+                            <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                                <option value="passcode">🔑 仅验证口令 (默认: 知道口令就能领，名字自由填)</option>
+                                <option value="whitelist">📋 仅验证白名单 (名字必须在下方标签列表内)</option>
                                 <option value="both">🔒 双重验证 (必须在白名单 且 口令正确，最严格)</option>
                                 <option value="none">🌐 开放模式 (免验证，任意领)</option>
                             </select>
@@ -1020,16 +1021,35 @@ INDEX_HTML = """
                         </div>
                     </div>
 
-                    <!-- WHITELIST NAMES EDITOR -->
-                    <div class="pt-1">
-                        <div class="flex items-center justify-between mb-1">
+                    <!-- INTERACTIVE WHITELIST TAGS MANAGER -->
+                    <div class="pt-2 border-t border-amber-200/60 space-y-2">
+                        <div class="flex items-center justify-between">
                             <label class="block font-semibold text-slate-700 text-xs">
-                                5. 授权兼职人员姓名/微信昵称白名单 (多个名字用逗号或换行隔开)：
+                                5. 已授权兼职人员标签列表（点击 ✕ 即可删除）：
                             </label>
-                            <span class="text-[10px] text-slate-400">只有名单内的人可领料</span>
+                            <span class="text-[10px] text-amber-700 font-bold" id="whitelistCountBadge">当前 0 人</span>
                         </div>
-                        <textarea id="settingWhitelist" rows="2" placeholder="例如: y, 小明, 小红, 矩阵兼职01, 张三" 
-                            class="w-full p-2 bg-white border border-amber-300 rounded-lg text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"></textarea>
+
+                        <!-- Tag Pills Container -->
+                        <div id="whitelistTagsContainer" class="flex flex-wrap gap-1.5 p-2 bg-white rounded-xl border border-amber-200 min-h-[44px] items-center">
+                            <!-- Populated by JS -->
+                        </div>
+
+                        <!-- Add New Worker Tag Input with [+] Button -->
+                        <div class="flex gap-2">
+                            <input type="text" id="newWhitelistItemInput" placeholder="输入兼职微信昵称 / 姓名 (按回车或点加号)" 
+                                class="flex-1 px-3 py-1.5 bg-white border border-amber-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium"
+                                onkeypress="if(event.key==='Enter') addWhitelistItem()">
+                            <button onclick="addWhitelistItem()" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1">
+                                <span>➕ 添加兼职</span>
+                            </button>
+                        </div>
+
+                        <!-- Quick-Pick Chips from Active Registered Workers -->
+                        <div id="quickAddWorkersBox" class="pt-1 flex items-center gap-1.5 text-[11px] text-slate-500 flex-wrap hidden">
+                            <span class="font-semibold text-slate-700">💡 快捷点击添加：</span>
+                            <div id="quickWorkerChips" class="flex flex-wrap gap-1"></div>
+                        </div>
                     </div>
 
                     <div class="flex justify-end pt-1">
@@ -1247,6 +1267,7 @@ INDEX_HTML = """
     <script>
         let currentMaterialData = null;
         let adminAuthToken = localStorage.getItem('xhs_admin_pwd') || '';
+        let currentWhitelist = ['y', '小明', '小红'];
 
         window.addEventListener('DOMContentLoaded', () => {
             const savedName = localStorage.getItem('xhs_distributor_name') || '';
@@ -1539,6 +1560,47 @@ INDEX_HTML = """
             span.innerText = `已选 ${count} 张`;
         }
 
+        function renderWhitelistTags() {
+            const container = document.getElementById('whitelistTagsContainer');
+            const countBadge = document.getElementById('whitelistCountBadge');
+            countBadge.innerText = `当前 ${currentWhitelist.length} 人`;
+            if (currentWhitelist.length === 0) {
+                container.innerHTML = '<span class="text-slate-400 text-xs py-1">暂无白名单人员，请在下方添加</span>';
+                return;
+            }
+            container.innerHTML = currentWhitelist.map(name => `
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300 shadow-sm">
+                    <span>${name}</span>
+                    <button onclick="removeWhitelistItem('${name}')" title="删除" class="ml-1.5 text-amber-500 hover:text-red-600 font-bold focus:outline-none text-sm leading-none">&times;</button>
+                </span>
+            `).join('');
+        }
+
+        function addWhitelistItem(customName) {
+            const input = document.getElementById('newWhitelistItemInput');
+            const name = (customName || input.value).trim();
+            if (!name) {
+                showToast('请输入兼职昵称！');
+                return;
+            }
+            if (currentWhitelist.includes(name)) {
+                showToast(`【${name}】已在白名单中！`);
+                return;
+            }
+            currentWhitelist.push(name);
+            if (!customName) input.value = '';
+            renderWhitelistTags();
+            saveAdminSettingsSilently();
+            showToast(`已添加【${name}】至白名单！`);
+        }
+
+        function removeWhitelistItem(name) {
+            currentWhitelist = currentWhitelist.filter(item => item !== name);
+            renderWhitelistTags();
+            saveAdminSettingsSilently();
+            showToast(`已将【${name}】从白名单移除`);
+        }
+
         async function loadAdminSettings() {
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1550,9 +1612,33 @@ INDEX_HTML = """
                     document.getElementById('settingPasscode').value = data.passcode || '8888';
                     document.getElementById('settingDailyLimit').value = data.daily_limit || 3;
                     document.getElementById('settingAutoDelete').value = data.auto_delete_consumed ? '1' : '0';
-                    const list = data.whitelist || [];
-                    document.getElementById('settingWhitelist').value = Array.isArray(list) ? list.join(', ') : list;
+                    currentWhitelist = Array.isArray(data.whitelist) ? data.whitelist : [];
+                    renderWhitelistTags();
                 }
+            } catch (err) {}
+        }
+
+        async function saveAdminSettingsSilently() {
+            const auth_mode = document.getElementById('settingAuthMode').value;
+            const passcode = document.getElementById('settingPasscode').value.trim();
+            const daily_limit = document.getElementById('settingDailyLimit').value.trim();
+            const auto_delete = document.getElementById('settingAutoDelete').value === '1';
+
+            try {
+                await fetch('/api/admin/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        auth_mode: auth_mode,
+                        passcode: passcode,
+                        daily_limit: daily_limit,
+                        auto_delete_consumed: auto_delete,
+                        whitelist: currentWhitelist
+                    })
+                });
             } catch (err) {}
         }
 
@@ -1561,7 +1647,6 @@ INDEX_HTML = """
             const passcode = document.getElementById('settingPasscode').value.trim();
             const daily_limit = document.getElementById('settingDailyLimit').value.trim();
             const auto_delete = document.getElementById('settingAutoDelete').value === '1';
-            const whitelist_raw = document.getElementById('settingWhitelist').value.trim();
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1575,7 +1660,7 @@ INDEX_HTML = """
                         passcode: passcode,
                         daily_limit: daily_limit,
                         auto_delete_consumed: auto_delete,
-                        whitelist: whitelist_raw
+                        whitelist: currentWhitelist
                     })
                 });
                 const data = await res.json();
@@ -1591,7 +1676,7 @@ INDEX_HTML = """
 
         async function previewSlot(slotNum) {
             const input = document.getElementById(`slot${slotNum}File`);
-            const preview = document.getElementById(`slot${slotNum}Preview`);
+            const preview = document.getElementById(`slot${slotNumPreview}`);
             if (input.files && input.files[0]) {
                 const file = input.files[0];
                 const reader = new FileReader();
@@ -1796,6 +1881,23 @@ INDEX_HTML = """
                     document.getElementById('statTotal').innerText = data.stats.total_materials;
                     document.getElementById('statAvailable').innerText = data.stats.available;
                     document.getElementById('statCompleted').innerText = data.stats.completed;
+
+                    // Quick-add worker chips
+                    if (data.workers && data.workers.length > 0) {
+                        const quickBox = document.getElementById('quickAddWorkersBox');
+                        const quickChips = document.getElementById('quickWorkerChips');
+                        quickBox.classList.remove('hidden');
+                        quickChips.innerHTML = data.workers.map(w => {
+                            const isAdded = currentWhitelist.includes(w.name);
+                            return `
+                                <button onclick="addWhitelistItem('${w.name}')" 
+                                    class="px-2 py-0.5 rounded-lg border text-[10px] font-bold transition flex items-center space-x-1 ${isAdded ? 'bg-amber-100 text-amber-800 border-amber-300' : 'bg-white text-slate-600 border-slate-200 hover:bg-amber-50'}">
+                                    <span>${w.name}</span>
+                                    <span>${isAdded ? '✓' : '+'}</span>
+                                </button>
+                            `;
+                        }).join('');
+                    }
 
                     const matBody = document.getElementById('adminMaterialsBody');
                     if (data.materials.length > 0) {
