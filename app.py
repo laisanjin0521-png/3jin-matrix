@@ -1032,7 +1032,6 @@ INDEX_HTML = """
 
                         <!-- Tag Pills Container -->
                         <div id="whitelistTagsContainer" class="flex flex-wrap gap-1.5 p-2 bg-white rounded-xl border border-amber-200 min-h-[44px] items-center">
-                            <!-- Populated by JS -->
                         </div>
 
                         <!-- Add New Worker Tag Input with [+] Button -->
@@ -1676,7 +1675,7 @@ INDEX_HTML = """
 
         async function previewSlot(slotNum) {
             const input = document.getElementById(`slot${slotNum}File`);
-            const preview = document.getElementById(`slot${slotNumPreview}`);
+            const preview = document.getElementById(`slot${slotNum}Preview`);
             if (input.files && input.files[0]) {
                 const file = input.files[0];
                 const reader = new FileReader();
@@ -1780,7 +1779,7 @@ INDEX_HTML = """
                 return;
             }
 
-            const copies = raw_copy.split(/===+|\n---+\n/).map(c => c.trim()).filter(c => c.length > 0);
+            const copies = raw_copy.split('===').map(c => c.trim()).filter(c => c.length > 0);
             if (copies.length === 0) {
                 showToast('未能识别到有效文案，请用 === 分隔多篇文案！');
                 return;
@@ -1882,7 +1881,6 @@ INDEX_HTML = """
                     document.getElementById('statAvailable').innerText = data.stats.available;
                     document.getElementById('statCompleted').innerText = data.stats.completed;
 
-                    // Quick-add worker chips
                     if (data.workers && data.workers.length > 0) {
                         const quickBox = document.getElementById('quickAddWorkersBox');
                         const quickChips = document.getElementById('quickWorkerChips');
