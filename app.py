@@ -149,6 +149,29 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
     except Exception as e:
         return True, "", "已提交待后台复核", True, "unverified"
 
+def resolve_file_path(path_str):
+    if not path_str:
+        return None
+    # 1. Exact path
+    if os.path.exists(path_str):
+        return path_str
+    # 2. Relative to PROJECT_ROOT
+    p1 = os.path.join(PROJECT_ROOT, path_str.lstrip('/'))
+    if os.path.exists(p1):
+        return p1
+    # 3. Search in MATERIALS_DIR
+    clean_parts = path_str.replace('\\', '/').split('/')
+    for i in range(len(clean_parts)):
+        sub = os.path.join(MATERIALS_DIR, *clean_parts[i:])
+        if os.path.exists(sub):
+            return sub
+    # 4. Search Desktop fallback (if on local mac)
+    for i in range(len(clean_parts)):
+        sub = os.path.join('/Users/air/Desktop/9月1日代运营整', *clean_parts[i:])
+        if os.path.exists(sub):
+            return sub
+    return None
+
 def scan_and_import_materials_from_folder():
     target_dir = MATERIALS_DIR if os.path.exists(MATERIALS_DIR) else '/Users/air/Desktop/9月1日代运营整'
     if not os.path.exists(target_dir):
@@ -187,7 +210,8 @@ def scan_and_import_materials_from_folder():
             return 99
         img_files.sort(key=img_sort_key)
         
-        images_full = [os.path.join(group_path, img) for img in img_files]
+        # Store clean relative path: materials/第01组_.../图1_封面.png
+        images_rel = [f"materials/{group}/{img}" for img in img_files]
         
         title = group
         if copy_text:
@@ -200,13 +224,13 @@ def scan_and_import_materials_from_folder():
         cursor.execute("""
         INSERT OR IGNORE INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, 'available', ?)
-        """, (group, title, group_path, json.dumps(images_full, ensure_ascii=False), copy_text, last_tag, now_str))
+        """, (group, title, group_path, json.dumps(images_rel, ensure_ascii=False), copy_text, last_tag, now_str))
         if cursor.rowcount > 0:
             imported_count += 1
         else:
             cursor.execute("""
-            UPDATE materials SET copy_text = ?, last_tag = ? WHERE group_name = ?
-            """, (copy_text, last_tag, group))
+            UPDATE materials SET images_json = ?, copy_text = ?, last_tag = ? WHERE group_name = ?
+            """, (json.dumps(images_rel, ensure_ascii=False), copy_text, last_tag, group))
 
     conn.commit()
     conn.close()
@@ -245,9 +269,11 @@ def download_zip():
                     zf.writestr(f"图{idx+1}_配图.{ext}", img_data)
                 except:
                     pass
-            elif os.path.exists(img_ref):
-                ext = os.path.splitext(img_ref)[1]
-                zf.write(img_ref, f"图{idx+1}_配图{ext}")
+            else:
+                real_file = resolve_file_path(img_ref)
+                if real_file and os.path.exists(real_file):
+                    ext = os.path.splitext(real_file)[1]
+                    zf.write(real_file, f"图{idx+1}_配图{ext}")
         if copy_text:
             zf.writestr('发布文案.txt', copy_text)
             
@@ -259,10 +285,24 @@ def download_zip():
 @app.route('/api/image')
 def serve_image():
     path = request.args.get('path', '')
-    if not path or not os.path.exists(path):
+    if not path:
         return 'Image not found', 404
-    mime, _ = mimetypes.guess_type(path)
-    return send_file(path, mimetype=mime or 'image/jpeg')
+        
+    if path.startswith('data:'):
+        try:
+            header, encoded = path.split(',', 1)
+            data = base64.b64decode(encoded)
+            mime = header.split(';')[0].replace('data:', '')
+            return Response(data, mimetype=mime or 'image/jpeg')
+        except Exception:
+            return 'Invalid base64', 400
+
+    real_path = resolve_file_path(path)
+    if real_path and os.path.exists(real_path):
+        mime, _ = mimetypes.guess_type(real_path)
+        return send_file(real_path, mimetype=mime or 'image/jpeg')
+        
+    return 'Image not found', 404
 
 @app.route('/api/user/status', methods=['GET'])
 def get_user_status():
