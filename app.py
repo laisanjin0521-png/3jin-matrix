@@ -841,9 +841,9 @@ INDEX_HTML = """
     <!-- Top Navigation Header -->
     <header class="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200 px-4 py-3 shadow-sm">
         <div class="max-w-3xl mx-auto flex items-center justify-between">
-            <div class="flex items-center space-x-2">
-                <div class="w-8 h-8 rounded-lg xhs-gradient flex items-center justify-center text-white font-bold text-lg shadow-sm">
-                    小
+            <div class="flex items-center space-x-2.5">
+                <div class="h-8 px-2.5 rounded-xl bg-[#ff2442] flex items-center justify-center text-white font-black text-xs shadow-md shadow-red-500/20 tracking-wider select-none">
+                    小红书
                 </div>
                 <div>
                     <h1 class="font-bold text-slate-900 leading-none text-base">矩阵分发 · 领料打卡台</h1>
