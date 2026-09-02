@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import base64
 import sqlite3
 import datetime
 import zipfile
@@ -11,7 +12,8 @@ from flask import Flask, request, jsonify, send_file, render_template_string, Re
 
 app = Flask(__name__)
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.db')
-DESKTOP_PATH = '/Users/air/Desktop'
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+MATERIALS_DIR = os.path.join(PROJECT_ROOT, 'materials')
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -27,10 +29,10 @@ def init_db():
         group_name TEXT UNIQUE,
         title TEXT,
         folder_path TEXT,
-        images_json TEXT,
+        images_json TEXT, -- JSON array of file paths or base64 data URIs
         copy_text TEXT,
         last_tag TEXT,
-        status TEXT DEFAULT 'available',
+        status TEXT DEFAULT 'available', -- 'available', 'assigned', 'completed'
         assigned_to TEXT,
         assigned_at TEXT,
         created_at TEXT
@@ -75,6 +77,7 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '1')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_delete_consumed', '0')")
     
     conn.commit()
     conn.close()
@@ -95,7 +98,6 @@ def set_setting(key, value):
     conn.close()
 
 def extract_last_tag(copy_text):
-    """Extract the last hashtag from the copywriting text."""
     if not copy_text:
         return ''
     tags = re.findall(r'#[^\s#]+', copy_text)
@@ -124,7 +126,6 @@ def check_worker_auth(user_name, passcode):
     return True, ""
 
 def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
-    """Detect Xiaohongshu link validity and verify if it matches the assigned copy tag/title."""
     if not ('xhslink.com' in url or 'xiaohongshu.com' in url):
         return False, "请提供有效的小红书笔记分享链接 (xhslink.com 或 xiaohongshu.com)！", "", False, "invalid_url"
         
@@ -138,11 +139,9 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
             title_m = re.search(r'<title>(.*?)</title>', html)
             fetched_title = title_m.group(1).replace(' - 小红书', '').strip() if title_m else ''
             
-            # Check for tag keyword in HTML
             tag_clean = expected_tag.replace('#', '').strip() if expected_tag else ''
             tag_found = (tag_clean in html or tag_clean in fetched_title) if tag_clean else True
             
-            # Title keywords check
             keywords = [w for w in re.split(r'[\s_，。：:、！!]+', expected_title) if len(w) >= 2]
             title_matched = any(k in html or k in fetched_title for k in keywords) if keywords else True
             
@@ -151,70 +150,64 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
     except Exception as e:
         return True, "", "已提交待后台复核", True, "unverified"
 
-def scan_and_import_desktop_materials():
+def scan_and_import_materials_from_folder():
+    target_dir = MATERIALS_DIR if os.path.exists(MATERIALS_DIR) else '/Users/air/Desktop/9月1日代运营整'
+    if not os.path.exists(target_dir):
+        return 0
+
     conn = get_db()
     cursor = conn.cursor()
-    
-    target_dirs = []
-    if os.path.exists(DESKTOP_PATH):
-        for item in os.listdir(DESKTOP_PATH):
-            item_path = os.path.join(DESKTOP_PATH, item)
-            if os.path.isdir(item_path) and ('代运营整' in item or '代运营' in item):
-                target_dirs.append(item_path)
-
     imported_count = 0
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    for parent_dir in target_dirs:
-        for group in sorted(os.listdir(parent_dir)):
-            group_path = os.path.join(parent_dir, group)
-            if not os.path.isdir(group_path) or not re.match(r'^第\d+组', group):
-                continue
-            
-            files = os.listdir(group_path)
-            img_files = []
-            copy_text = ''
-            
-            for f in sorted(files):
-                f_lower = f.lower()
-                if f.endswith('.txt') or f.endswith('.md'):
-                    txt_path = os.path.join(group_path, f)
-                    try:
-                        with open(txt_path, 'r', encoding='utf-8') as tf:
-                            copy_text = tf.read().strip()
-                    except Exception:
-                        pass
-                elif any(f_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-                    img_files.append(f)
-            
-            def img_sort_key(name):
-                if '1' in name or '封面' in name: return 1
-                if '2' in name or '内容' in name: return 2
-                if '3' in name or '尾图' in name: return 3
-                return 99
-            img_files.sort(key=img_sort_key)
-            
-            images_full = [os.path.join(group_path, img) for img in img_files]
-            
-            title = group
-            if copy_text:
-                first_line = copy_text.split('\n')[0].strip()
-                if first_line:
-                    title = first_line[:30]
-            
-            last_tag = extract_last_tag(copy_text)
+    for group in sorted(os.listdir(target_dir)):
+        group_path = os.path.join(target_dir, group)
+        if not os.path.isdir(group_path) or not re.match(r'^第\d+组', group):
+            continue
+        
+        files = os.listdir(group_path)
+        img_files = []
+        copy_text = ''
+        
+        for f in sorted(files):
+            f_lower = f.lower()
+            if f.endswith('.txt') or f.endswith('.md'):
+                txt_path = os.path.join(group_path, f)
+                try:
+                    with open(txt_path, 'r', encoding='utf-8') as tf:
+                        copy_text = tf.read().strip()
+                except Exception:
+                    pass
+            elif any(f_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                img_files.append(f)
+        
+        def img_sort_key(name):
+            if '1' in name or '封面' in name: return 1
+            if '2' in name or '内容' in name: return 2
+            if '3' in name or '尾图' in name: return 3
+            return 99
+        img_files.sort(key=img_sort_key)
+        
+        images_full = [os.path.join(group_path, img) for img in img_files]
+        
+        title = group
+        if copy_text:
+            first_line = copy_text.split('\n')[0].strip()
+            if first_line:
+                title = first_line[:30]
+        
+        last_tag = extract_last_tag(copy_text)
 
+        cursor.execute("""
+        INSERT OR IGNORE INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'available', ?)
+        """, (group, title, group_path, json.dumps(images_full, ensure_ascii=False), copy_text, last_tag, now_str))
+        if cursor.rowcount > 0:
+            imported_count += 1
+        else:
             cursor.execute("""
-            INSERT OR IGNORE INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'available', ?)
-            """, (group, title, group_path, json.dumps(images_full, ensure_ascii=False), copy_text, last_tag, now_str))
-            if cursor.rowcount > 0:
-                imported_count += 1
-            else:
-                # update copy_text and last_tag
-                cursor.execute("""
-                UPDATE materials SET copy_text = ?, last_tag = ? WHERE group_name = ?
-                """, (copy_text, last_tag, group))
+            UPDATE materials SET copy_text = ?, last_tag = ? WHERE group_name = ?
+            """, (copy_text, last_tag, group))
 
     conn.commit()
     conn.close()
@@ -239,14 +232,23 @@ def download_zip():
     
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, img_path in enumerate(images):
-            if os.path.exists(img_path):
-                zf.write(img_path, f"图{idx+1}_{os.path.basename(img_path)}")
+        for idx, img_ref in enumerate(images):
+            if img_ref.startswith('data:'):
+                try:
+                    header, encoded = img_ref.split(',', 1)
+                    img_data = base64.b64decode(encoded)
+                    ext = 'png' if 'png' in header else 'jpg'
+                    zf.writestr(f"图{idx+1}_配图.{ext}", img_data)
+                except:
+                    pass
+            elif os.path.exists(img_ref):
+                zf.write(img_ref, f"图{idx+1}_{os.path.basename(img_ref)}")
         if copy_text:
             zf.writestr('发布文案.txt', copy_text)
             
     memory_file.seek(0)
-    filename = f"{mat['group_name']}.zip"
+    clean_name = re.sub(r'[^\w\u4e00-\u9fa5]', '_', mat['group_name'])[:20]
+    filename = f"{clean_name}.zip"
     return send_file(memory_file, mimetype='application/zip', as_attachment=True, download_name=filename)
 
 @app.route('/api/image')
@@ -254,8 +256,6 @@ def serve_image():
     path = request.args.get('path', '')
     if not path or not os.path.exists(path):
         return 'Image not found', 404
-    if not (path.startswith(DESKTOP_PATH) or path.startswith('/Users/air/.gemini/antigravity')):
-        return 'Forbidden', 403
     mime, _ = mimetypes.guess_type(path)
     return send_file(path, mimetype=mime or 'image/jpeg')
 
@@ -364,7 +364,7 @@ def claim_material():
             url_match = re.search(r'https?://[^\s]+', xhs_link)
             clean_url = url_match.group(0) if url_match else xhs_link
             
-            # 1. Anti-duplicate link check
+            # Anti-duplicate link check
             cursor.execute('SELECT id, user_name, submitted_at FROM submissions WHERE xhs_link = ?', (clean_url,))
             existing_sub = cursor.fetchone()
             if existing_sub:
@@ -374,7 +374,7 @@ def claim_material():
                     'error': f'⚠️ 该小红书链接已被提交打卡过（提交人：{existing_sub["user_name"]}），请勿使用重复链接！'
                 })
             
-            # 2. Automated Tag & Content Detection
+            # Automated Tag & Content Detection
             expected_tag = curr_mat['last_tag'] or extract_last_tag(curr_mat['copy_text'])
             is_valid_link, err_msg, xhs_title, matched, check_status = auto_detect_xhs_link_with_tag(clean_url, expected_tag, curr_mat['title'])
             if not is_valid_link:
@@ -394,7 +394,12 @@ def claim_material():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')
             """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str))
             
-            cursor.execute('UPDATE materials SET status = "completed" WHERE id = ?', (curr_mat['id'],))
+            # Anti-Reuse Engine: Mark as permanently completed or auto-delete if enabled
+            auto_delete = get_setting('auto_delete_consumed', '0') == '1'
+            if auto_delete:
+                cursor.execute('DELETE FROM materials WHERE id = ?', (curr_mat['id'],))
+            else:
+                cursor.execute('UPDATE materials SET status = "completed" WHERE id = ?', (curr_mat['id'],))
             
             today_submitted += 1
             cursor.execute("""
@@ -430,7 +435,7 @@ def claim_material():
                     'error': f'⏳ 小红书养号防封保护：距离上一篇发布还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
                 })
     
-    # Find next available material
+    # Pick next available material (Strictly NEVER reuse already assigned/completed ones!)
     cursor.execute('SELECT * FROM materials WHERE status = "available" ORDER BY id ASC LIMIT 1')
     next_mat = cursor.fetchone()
     
@@ -443,6 +448,7 @@ def claim_material():
             'no_more': True
         })
         
+    # Mark strictly as assigned (Locked exclusively to this worker!)
     cursor.execute("""
     UPDATE materials SET status = "assigned", assigned_to = ?, assigned_at = ? WHERE id = ?
     """, (user_name, now_str, next_mat['id']))
@@ -504,6 +510,8 @@ def admin_settings():
             set_setting('cooldown_minutes', str(int(data['cooldown_minutes'])))
         if 'strict_tag_check' in data:
             set_setting('strict_tag_check', '1' if data['strict_tag_check'] else '0')
+        if 'auto_delete_consumed' in data:
+            set_setting('auto_delete_consumed', '1' if data['auto_delete_consumed'] else '0')
         if 'admin_password' in data and data['admin_password'].strip():
             set_setting('admin_password', data['admin_password'].strip())
         if 'whitelist' in data:
@@ -527,9 +535,86 @@ def admin_settings():
         'daily_limit': get_setting('daily_limit', '3'),
         'cooldown_minutes': get_setting('cooldown_minutes', '0'),
         'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
+        'auto_delete_consumed': get_setting('auto_delete_consumed', '0') == '1',
         'admin_password': get_setting('admin_password', '060521'),
         'whitelist': whitelist
     })
+
+@app.route('/api/admin/materials/add', methods=['POST'])
+def admin_add_material():
+    """Web-based material uploader from mobile or desktop browser."""
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+
+    data = request.json or {}
+    group_name = data.get('group_name', '').strip()
+    copy_text = data.get('copy_text', '').strip()
+    images = data.get('images', []) # list of base64 data URIs
+    
+    if not group_name:
+        return jsonify({'success': False, 'error': '请输入素材组名/标题！'})
+    if not copy_text:
+        return jsonify({'success': False, 'error': '请填写发布文案！'})
+    if not images or len(images) == 0:
+        return jsonify({'success': False, 'error': '请至少上传 1~3 张配图！'})
+        
+    title = group_name
+    first_line = copy_text.split('\n')[0].strip()
+    if first_line:
+        title = first_line[:30]
+        
+    last_tag = extract_last_tag(copy_text)
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+        INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+        VALUES (?, ?, 'cloud_upload', ?, ?, ?, 'available', ?)
+        """, (group_name, title, json.dumps(images, ensure_ascii=False), copy_text, last_tag, now_str))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': f'🎉 素材【{group_name}】已成功加入素材池！'})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({'success': False, 'error': f'素材组名【{group_name}】已存在，请换一个名称！'})
+
+@app.route('/api/admin/materials/delete', methods=['POST'])
+def admin_delete_material():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    
+    data = request.json or {}
+    mat_id = data.get('id')
+    if not mat_id:
+        return jsonify({'success': False, 'error': 'Missing id'})
+        
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM materials WHERE id = ?', (mat_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '素材已成功删除！'})
+
+@app.route('/api/admin/materials/clear_completed', methods=['POST'])
+def admin_clear_completed():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+        
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM materials WHERE status = "completed"')
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': f'已成功清理 {count} 组已消耗的素材！'})
 
 @app.route('/api/admin/stats', methods=['GET'])
 def admin_stats():
@@ -580,8 +665,8 @@ def admin_sync():
     real_pwd = get_setting('admin_password', '060521').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
-    count = scan_and_import_desktop_materials()
-    return jsonify({'success': True, 'imported': count, 'message': f'成功从桌面同步导入 {count} 组新素材！'})
+    count = scan_and_import_materials_from_folder()
+    return jsonify({'success': True, 'imported': count, 'message': f'成功从文件夹同步导入 {count} 组新素材！'})
 
 @app.route('/api/admin/export_csv', methods=['GET'])
 def export_csv():
@@ -632,7 +717,7 @@ INDEX_HTML = """
                 </div>
                 <div>
                     <h1 class="font-bold text-slate-900 leading-none text-base">矩阵分发 · 领料打卡台</h1>
-                    <p class="text-xs text-slate-400 mt-0.5">自动识别文案Tag · 即时派单</p>
+                    <p class="text-xs text-slate-400 mt-0.5">独家素材派发 · 一客一单不复用</p>
                 </div>
             </div>
             <div class="flex items-center space-x-2">
@@ -688,10 +773,10 @@ INDEX_HTML = """
             <!-- State 1: No active task, can claim first task -->
             <div id="firstClaimBox" class="mt-3 space-y-3">
                 <div class="p-3 bg-amber-50 rounded-xl border border-amber-200/60 text-xs text-amber-800 leading-relaxed">
-                    📌 <strong>领料说明</strong>：输入姓名与口令后，点击下方按钮即可领取今日第 1 组发布素材！
+                    📌 <strong>领料说明</strong>：输入姓名与口令后，点击下方按钮即可领取专属独家发布素材（每组素材独家派发，不重复使用）！
                 </div>
                 <button onclick="claimMaterial(false)" class="w-full py-3.5 xhs-gradient hover:opacity-95 text-white rounded-xl font-bold text-sm shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2">
-                    <span>🎁 领取第 1 组发布素材</span>
+                    <span>🎁 领取第 1 组独家素材</span>
                 </button>
             </div>
 
@@ -702,7 +787,7 @@ INDEX_HTML = """
                         <span>⏳ 当前进行中任务：<span id="activeGroupName" class="text-blue-700"></span></span>
                         <span class="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-bold">待回传链接</span>
                     </div>
-                    <p class="mt-1 text-slate-600">小红书发布完成后，复制该作品的<strong>分享链接</strong>粘贴在下方，即可提交打卡并领取下一组新素材！</p>
+                    <p class="mt-1.5 text-slate-600 leading-relaxed">小红书发布完成后，复制该作品的<strong>分享链接</strong>粘贴在下方，即可提交打卡并领取下一组新素材！</p>
                 </div>
 
                 <div>
@@ -809,7 +894,7 @@ INDEX_HTML = """
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">实时打卡审核 · 文案Tag核验 · 权限配置</p>
+                        <p class="text-xs text-slate-400">素材库管理 · 在线加新素材 · 彻底防复用</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -818,12 +903,66 @@ INDEX_HTML = """
             <!-- Modal Content (Scrollable) -->
             <div class="p-5 overflow-y-auto space-y-5 flex-1">
                 
-                <!-- Security & Access Settings Card -->
+                <!-- Stat Cards -->
+                <div class="grid grid-cols-3 gap-3">
+                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
+                        <div class="text-xs text-slate-500 font-medium">总素材组数</div>
+                        <div class="text-xl font-bold text-slate-900 mt-0.5" id="statTotal">0</div>
+                    </div>
+                    <div class="bg-emerald-50 p-3 rounded-xl border border-emerald-100 text-center">
+                        <div class="text-xs text-emerald-700 font-medium">剩余待领 (独家)</div>
+                        <div class="text-xl font-bold text-emerald-600 mt-0.5" id="statAvailable">0</div>
+                    </div>
+                    <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
+                        <div class="text-xs text-blue-700 font-medium">已消耗作废</div>
+                        <div class="text-xl font-bold text-blue-600 mt-0.5" id="statCompleted">0</div>
+                    </div>
+                </div>
+
+                <!-- ADD NEW MATERIAL ACCORDION / CARD -->
+                <div class="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200/80 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="font-bold text-xs text-emerald-900 flex items-center space-x-1.5 uppercase tracking-wider">
+                            <span>➕</span>
+                            <span>直接在后台添加新素材 (手机/电脑均可上传)</span>
+                        </h3>
+                        <span class="text-[10px] text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded font-semibold">即时入库</span>
+                    </div>
+
+                    <div class="space-y-2.5 text-xs">
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">1. 素材组名 / 标题：</label>
+                            <input type="text" id="newGroupInput" placeholder="例如: 第13组_实体商家获客新思路" 
+                                class="w-full px-3 py-2 bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">2. 选择发布配图 (1~3 张，按顺序上传)：</label>
+                            <input type="file" id="newImagesInput" multiple accept="image/*" 
+                                class="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
+                            <div id="imagePreviewContainer" class="flex gap-2 mt-2 hidden"></div>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 粘贴发布文案 (第一行自动作为笔记标题，尾部带 Tag)：</label>
+                            <textarea id="newCopyInput" rows="4" placeholder="粘贴完整文案... 尾部请附带 #行业代运营 等标签" 
+                                class="w-full p-2.5 bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-end pt-1">
+                        <button onclick="submitNewMaterial()" id="addMatBtn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1">
+                            <span>💾 立即加入素材池</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Security & Anti-Cheat Settings Card -->
                 <div class="p-4 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-3">
                     <div class="flex items-center justify-between">
                         <h3 class="font-bold text-xs text-amber-900 flex items-center space-x-1.5 uppercase tracking-wider">
                             <span>🔐</span>
-                            <span>领料权限与矩阵风控配置</span>
+                            <span>防作弊与素材消耗规则</span>
                         </h3>
                         <span class="text-[10px] text-amber-700 bg-amber-100 px-2 py-0.5 rounded font-semibold">即时生效</span>
                     </div>
@@ -842,10 +981,10 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 文案Tag与标题严格核验：</label>
-                            <select id="settingStrictTag" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
-                                <option value="1">开启严格模式 (Tag与标题不符直接拒绝打卡)</option>
-                                <option value="0">宽松模式 (未检测到仅后台打标提醒)</option>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 已发作品防复用策略：</label>
+                            <select id="settingAutoDelete" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
+                                <option value="0">标记为【已消耗】(保留记录，绝不再派发任何人)</option>
+                                <option value="1">打卡后【立即自动物理销毁】(完全不留痕迹)</option>
                             </select>
                         </div>
 
@@ -854,50 +993,50 @@ INDEX_HTML = """
                             <input type="number" id="settingCooldown" min="0" max="720" placeholder="0 表示不限制" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
                         </div>
-
-                        <div class="sm:col-span-2">
-                            <label class="block font-semibold text-slate-700 mb-1">5. 白名单人员名单 (用逗号或换行隔开)：</label>
-                            <textarea id="settingWhitelist" rows="2" placeholder="例如: y, 小明, 阿峰, 兼职01" 
-                                class="w-full p-2.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800 text-xs"></textarea>
-                        </div>
                     </div>
 
                     <div class="flex justify-end pt-1">
                         <button onclick="saveAdminSettings()" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm transition">
-                            💾 保存配置
+                            💾 保存设置
                         </button>
                     </div>
                 </div>
 
-                <!-- Stat Cards -->
-                <div class="grid grid-cols-3 gap-3">
-                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
-                        <div class="text-xs text-slate-500 font-medium">总素材组数</div>
-                        <div class="text-xl font-bold text-slate-900 mt-0.5" id="statTotal">0</div>
+                <!-- Material Inventory Management -->
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider">📦 素材库存状态清单 (一客一单 · 独家防复用)：</h3>
+                        <button onclick="clearCompletedMaterials()" class="text-[11px] text-red-600 hover:text-red-700 font-bold">
+                            🗑️ 一键清空所有已消耗素材
+                        </button>
                     </div>
-                    <div class="bg-emerald-50 p-3 rounded-xl border border-emerald-100 text-center">
-                        <div class="text-xs text-emerald-700 font-medium">剩余待领</div>
-                        <div class="text-xl font-bold text-emerald-600 mt-0.5" id="statAvailable">0</div>
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-56 overflow-y-auto">
+                        <table class="w-full text-xs text-left border-collapse">
+                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr>
+                                    <th class="p-2">组号/名称</th>
+                                    <th class="p-2">标题</th>
+                                    <th class="p-2">尾Tag</th>
+                                    <th class="p-2">状态</th>
+                                    <th class="p-2">领走人</th>
+                                    <th class="p-2 text-right">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminMaterialsBody" class="divide-y divide-slate-100">
+                                <tr><td colspan="6" class="p-4 text-center text-slate-400">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
-                    <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
-                        <div class="text-xs text-blue-700 font-medium">今日已打卡</div>
-                        <div class="text-xl font-bold text-blue-600 mt-0.5" id="statSubmissions">0</div>
-                    </div>
-                </div>
-
-                <!-- Admin Action Buttons -->
-                <div class="flex flex-wrap gap-2">
-                    <button onclick="syncDesktopMaterials()" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-semibold flex items-center space-x-1 transition">
-                        <span>🔄 扫描并同步桌面今日素材</span>
-                    </button>
-                    <a href="/api/admin/export_csv" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-1 transition">
-                        <span>📥 导出打卡记录 (Excel/CSV)</span>
-                    </a>
                 </div>
 
                 <!-- Recent Submissions Table -->
                 <div>
-                    <h3 class="font-bold text-xs text-slate-800 mb-2 uppercase tracking-wider">📋 实时打卡审核表：</h3>
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider">📋 实时打卡审核表：</h3>
+                        <a href="/api/admin/export_csv" class="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold">
+                            📥 导出 Excel 统计表
+                        </a>
+                    </div>
                     <div class="border border-slate-200 rounded-xl overflow-hidden">
                         <table class="w-full text-xs text-left border-collapse">
                             <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
@@ -906,33 +1045,12 @@ INDEX_HTML = """
                                     <th class="p-2.5">人员</th>
                                     <th class="p-2.5">领取组名</th>
                                     <th class="p-2.5">文案尾Tag</th>
-                                    <th class="p-2.5">小红书链接与标题</th>
-                                    <th class="p-2.5">核验状态</th>
+                                    <th class="p-2.5">小红书链接</th>
+                                    <th class="p-2.5">质检</th>
                                 </tr>
                             </thead>
                             <tbody id="adminSubmissionsBody" class="divide-y divide-slate-100">
                                 <tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Material Inventory Status -->
-                <div>
-                    <h3 class="font-bold text-xs text-slate-800 mb-2 uppercase tracking-wider">📦 素材库存状态清单：</h3>
-                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
-                        <table class="w-full text-xs text-left border-collapse">
-                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
-                                <tr>
-                                    <th class="p-2">组号</th>
-                                    <th class="p-2">标题</th>
-                                    <th class="p-2">尾Tag</th>
-                                    <th class="p-2">状态</th>
-                                    <th class="p-2">领走人</th>
-                                </tr>
-                            </thead>
-                            <tbody id="adminMaterialsBody" class="divide-y divide-slate-100">
-                                <tr><td colspan="5" class="p-4 text-center text-slate-400">加载中...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1064,7 +1182,7 @@ INDEX_HTML = """
             const copyPre = document.getElementById('copyTextPre');
             const zipBtn = document.getElementById('downloadZipBtn');
 
-            matBadge.innerText = mat.group_name.split('_')[0] || '专属素材';
+            matBadge.innerText = mat.group_name.split('_')[0] || '独家素材';
             matTitle.innerText = mat.title || mat.group_name;
             matTime.innerText = mat.assigned_at ? mat.assigned_at.split(' ')[1] + ' 分配' : '';
             copyPre.innerText = mat.copy_text;
@@ -1073,11 +1191,11 @@ INDEX_HTML = """
             imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
                 const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
                 const label = labels[idx] || `图${idx+1}`;
-                const encodedPath = encodeURIComponent(imgPath);
+                const srcUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
                 return `
                     <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col">
-                        <img src="/api/image?path=${encodedPath}" 
-                             onclick="previewImg('/api/image?path=${encodedPath}')" 
+                        <img src="${srcUrl}" 
+                             onclick="previewImg('${srcUrl}')" 
                              class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
                              alt="${label}">
                         <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
@@ -1232,8 +1350,7 @@ INDEX_HTML = """
                     document.getElementById('settingPasscode').value = data.passcode;
                     document.getElementById('settingDailyLimit').value = data.daily_limit || 3;
                     document.getElementById('settingCooldown').value = data.cooldown_minutes || 0;
-                    document.getElementById('settingStrictTag').value = data.strict_tag_check ? '1' : '0';
-                    document.getElementById('settingWhitelist').value = data.whitelist.join(', ');
+                    document.getElementById('settingAutoDelete').value = data.auto_delete_consumed ? '1' : '0';
                 }
             } catch (err) {}
         }
@@ -1242,8 +1359,7 @@ INDEX_HTML = """
             const passcode = document.getElementById('settingPasscode').value.trim();
             const daily_limit = document.getElementById('settingDailyLimit').value.trim();
             const cooldown = document.getElementById('settingCooldown').value.trim();
-            const strict_tag = document.getElementById('settingStrictTag').value === '1';
-            const whitelist_str = document.getElementById('settingWhitelist').value;
+            const auto_delete = document.getElementById('settingAutoDelete').value === '1';
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1256,8 +1372,7 @@ INDEX_HTML = """
                         passcode: passcode,
                         daily_limit: daily_limit,
                         cooldown_minutes: cooldown,
-                        strict_tag_check: strict_tag,
-                        whitelist: whitelist_str
+                        auto_delete_consumed: auto_delete
                     })
                 });
                 const data = await res.json();
@@ -1271,6 +1386,107 @@ INDEX_HTML = """
             }
         }
 
+        async function submitNewMaterial() {
+            const group_name = document.getElementById('newGroupInput').value.trim();
+            const copy_text = document.getElementById('newCopyInput').value.trim();
+            const files = document.getElementById('newImagesInput').files;
+
+            if (!group_name) {
+                showToast('请输入素材组名/标题！');
+                return;
+            }
+            if (!copy_text) {
+                showToast('请填写文案内容！');
+                return;
+            }
+            if (files.length === 0) {
+                showToast('请至少选择 1 张配图！');
+                return;
+            }
+
+            const btn = document.getElementById('addMatBtn');
+            btn.innerHTML = '<span>⏳ 正在上传入库...</span>';
+            btn.disabled = true;
+
+            const base64Images = [];
+            for (let i = 0; i < files.length; i++) {
+                const f = files[i];
+                const b64 = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(f);
+                });
+                base64Images.push(b64);
+            }
+
+            try {
+                const res = await fetch('/api/admin/materials/add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        group_name: group_name,
+                        copy_text: copy_text,
+                        images: base64Images
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    document.getElementById('newGroupInput').value = '';
+                    document.getElementById('newCopyInput').value = '';
+                    document.getElementById('newImagesInput').value = '';
+                    loadAdminData();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('上传素材失败');
+            } finally {
+                btn.innerHTML = '<span>💾 立即加入素材池</span>';
+                btn.disabled = false;
+            }
+        }
+
+        async function deleteMaterial(id, name) {
+            if (!confirm(`确定要从素材库彻底删除【${name}】吗？`)) return;
+            try {
+                const res = await fetch('/api/admin/materials/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({ id: id })
+                });
+                const data = await res.json();
+                showToast(data.message);
+                loadAdminData();
+            } catch (err) {
+                showToast('删除失败');
+            }
+        }
+
+        async function clearCompletedMaterials() {
+            if (!confirm('确定要一键清理所有已消耗/已打卡的素材吗？')) return;
+            try {
+                const res = await fetch('/api/admin/materials/clear_completed', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    }
+                });
+                const data = await res.json();
+                showToast(data.message);
+                loadAdminData();
+            } catch (err) {
+                showToast('清理失败');
+            }
+        }
+
         async function loadAdminData() {
             try {
                 const res = await fetch('/api/admin/stats', {
@@ -1280,7 +1496,31 @@ INDEX_HTML = """
                 if (data.success) {
                     document.getElementById('statTotal').innerText = data.stats.total_materials;
                     document.getElementById('statAvailable').innerText = data.stats.available;
-                    document.getElementById('statSubmissions').innerText = data.stats.total_submissions;
+                    document.getElementById('statCompleted').innerText = data.stats.completed;
+
+                    const matBody = document.getElementById('adminMaterialsBody');
+                    if (data.materials.length > 0) {
+                        matBody.innerHTML = data.materials.map(m => `
+                            <tr class="hover:bg-slate-50">
+                                <td class="p-2 font-bold text-slate-700 truncate max-w-[100px]">${m.group_name}</td>
+                                <td class="p-2 text-slate-600 truncate max-w-[120px]">${m.title}</td>
+                                <td class="p-2 font-mono text-[11px] text-blue-600">${m.last_tag || '-'}</td>
+                                <td class="p-2">
+                                    ${m.status === 'available' ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">待领(独家)</span>' :
+                                      m.status === 'assigned' ? '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">领用中</span>' :
+                                      '<span class="px-2 py-0.5 bg-slate-200 text-slate-600 font-bold rounded">已消耗作废</span>'}
+                                </td>
+                                <td class="p-2 text-slate-500">${m.assigned_to || '-'}</td>
+                                <td class="p-2 text-right">
+                                    <button onclick="deleteMaterial(${m.id}, '${m.group_name}')" class="text-red-600 hover:text-red-700 font-bold text-[11px]">
+                                        删除
+                                    </button>
+                                </td>
+                            </tr>
+                        `).join('');
+                    } else {
+                        matBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无素材，请在上方添加新素材</td></tr>';
+                    }
 
                     const subBody = document.getElementById('adminSubmissionsBody');
                     if (data.submissions.length > 0) {
@@ -1291,36 +1531,18 @@ INDEX_HTML = """
                                 <td class="p-2.5 text-slate-700 truncate max-w-[100px]">${s.material_name}</td>
                                 <td class="p-2.5 font-mono text-[11px] font-bold text-blue-600">${s.tag_expected || '-'}</td>
                                 <td class="p-2.5">
-                                    <div class="font-semibold text-slate-800 truncate max-w-[130px]">${s.xhs_title || '已打卡'}</div>
-                                    <a href="${s.xhs_link}" target="_blank" class="text-red-600 text-[11px] font-semibold hover:underline flex items-center space-x-1">
+                                    <a href="${s.xhs_link}" target="_blank" class="text-red-600 text-[11px] font-semibold hover:underline flex items-center space-x-1 truncate max-w-[130px]">
                                         <span>🔗 点此核验</span>
                                     </a>
                                 </td>
                                 <td class="p-2.5 whitespace-nowrap">
-                                    ${s.tag_matched === 1 ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">🟢 内容匹配</span>' :
-                                      '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">🟡 需复核</span>'}
+                                    ${s.tag_matched === 1 ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">🟢 匹配</span>' :
+                                      '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">🟡 异常</span>'}
                                 </td>
                             </tr>
                         `).join('');
                     } else {
                         subBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>';
-                    }
-
-                    const matBody = document.getElementById('adminMaterialsBody');
-                    if (data.materials.length > 0) {
-                        matBody.innerHTML = data.materials.map(m => `
-                            <tr class="hover:bg-slate-50">
-                                <td class="p-2 font-bold text-slate-700">${m.group_name.split('_')[0]}</td>
-                                <td class="p-2 text-slate-600 truncate max-w-[140px]">${m.title}</td>
-                                <td class="p-2 font-mono text-[11px] text-blue-600">${m.last_tag || '-'}</td>
-                                <td class="p-2">
-                                    ${m.status === 'available' ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">待领取</span>' :
-                                      m.status === 'assigned' ? '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 font-bold rounded">领用中</span>' :
-                                      '<span class="px-2 py-0.5 bg-slate-100 text-slate-600 font-bold rounded">已完成</span>'}
-                                </td>
-                                <td class="p-2 text-slate-500">${m.assigned_to || '-'}</td>
-                            </tr>
-                        `).join('');
                     }
                 } else if (data.error) {
                     adminAuthToken = '';
@@ -1329,20 +1551,6 @@ INDEX_HTML = """
                 }
             } catch (err) {
                 showToast('加载管理后台失败');
-            }
-        }
-
-        async function syncDesktopMaterials() {
-            try {
-                const res = await fetch('/api/admin/sync', {
-                    method: 'POST',
-                    headers: { 'X-Admin-Password': adminAuthToken }
-                });
-                const data = await res.json();
-                showToast(data.message);
-                loadAdminData();
-            } catch (err) {
-                showToast('同步失败');
             }
         }
     </script>
@@ -1356,6 +1564,6 @@ def index():
 
 if __name__ == '__main__':
     init_db()
-    scan_and_import_desktop_materials()
+    scan_and_import_materials_from_folder()
     print("Starting server on port 5050...")
     app.run(host='0.0.0.0', port=5050, debug=False)
