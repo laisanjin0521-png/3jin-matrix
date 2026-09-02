@@ -69,11 +69,10 @@ def init_db():
     )
     """)
     
-    # Defaults
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[\"y\", \"小明\"]')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[\"y\", \"小明\", \"小红\"]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '1')")
@@ -121,7 +120,7 @@ def check_worker_auth(user_name, passcode):
             
     if auth_mode in ('whitelist', 'both'):
         if user_name not in whitelist:
-            return False, f"未授权的分发人员【{user_name}】！请联系 3金 添加至授权名单。"
+            return False, f"⚠️ 未授权的分发人员【{user_name}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
             
     return True, ""
 
@@ -591,17 +590,16 @@ def admin_add_material():
 
 @app.route('/api/admin/materials/batch_add', methods=['POST'])
 def admin_batch_add():
-    """Batch assembler: Coworker drops 10-50 covers, 10-50 contents, 10-50 tails + texts."""
     admin_pwd = request.headers.get('X-Admin-Password', '')
     real_pwd = get_setting('admin_password', '060521').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
 
     data = request.json or {}
-    covers = data.get('covers', []) # list of b64
-    contents = data.get('contents', []) # list of b64
-    tails = data.get('tails', []) # list of b64
-    copies = data.get('copies', []) # list of strings
+    covers = data.get('covers', [])
+    contents = data.get('contents', [])
+    tails = data.get('tails', [])
+    copies = data.get('copies', [])
     prefix = data.get('prefix', '批量作品_').strip()
     
     if not covers or len(covers) == 0:
@@ -626,9 +624,9 @@ def admin_batch_add():
         imgs = []
         if i < len(covers): imgs.append(covers[i])
         if i < len(contents): imgs.append(contents[i])
-        elif len(contents) > 0: imgs.append(contents[0]) # reuse if 1 common content
+        elif len(contents) > 0: imgs.append(contents[0])
         if i < len(tails): imgs.append(tails[i])
-        elif len(tails) > 0: imgs.append(tails[0]) # reuse common tail
+        elif len(tails) > 0: imgs.append(tails[0])
         
         try:
             cursor.execute("""
@@ -955,7 +953,7 @@ INDEX_HTML = """
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">支持单篇/批量极速入库 · 团队协同 · 彻底防复用</p>
+                        <p class="text-xs text-slate-400">白名单授权 · 批量拼装 · 团队协同</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -977,6 +975,67 @@ INDEX_HTML = """
                     <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
                         <div class="text-xs text-blue-700 font-medium">已消耗作废</div>
                         <div class="text-xl font-bold text-blue-600 mt-0.5" id="statCompleted">0</div>
+                    </div>
+                </div>
+
+                <!-- Security, Whitelist & Anti-Cheat Settings Card -->
+                <div class="p-4 bg-amber-50/80 rounded-2xl border border-amber-200 space-y-3.5">
+                    <div class="flex items-center justify-between border-b border-amber-200/60 pb-2">
+                        <h3 class="font-bold text-xs text-amber-900 flex items-center space-x-1.5 uppercase tracking-wider">
+                            <span>🛡️</span>
+                            <span>兼职白名单与防作弊规则管理</span>
+                        </h3>
+                        <span class="text-[10px] text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded font-bold">即时生效</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">1. 兼职领料验证模式：</label>
+                            <select id="settingAuthMode" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                                <option value="passcode">🔑 仅验证口令 (默认: 知道口令就能领，名字随便填)</option>
+                                <option value="whitelist">📋 仅验证白名单 (名字必须在下方白名单内)</option>
+                                <option value="both">🔒 双重验证 (必须在白名单 且 口令正确，最严格)</option>
+                                <option value="none">🌐 开放模式 (免验证，任意领)</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">2. 统一领料口令：</label>
+                            <input type="text" id="settingPasscode" placeholder="如: 8888" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 每日单人领料上限 (篇/天)：</label>
+                            <input type="number" id="settingDailyLimit" min="1" max="20" placeholder="如: 3" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">4. 已发作品防复用策略：</label>
+                            <select id="settingAutoDelete" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
+                                <option value="0">标记为【已消耗】(保留记录，绝不再派发任何人)</option>
+                                <option value="1">打卡后【立即自动物理销毁】(完全不留痕迹)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- WHITELIST NAMES EDITOR -->
+                    <div class="pt-1">
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="block font-semibold text-slate-700 text-xs">
+                                5. 授权兼职人员姓名/微信昵称白名单 (多个名字用逗号或换行隔开)：
+                            </label>
+                            <span class="text-[10px] text-slate-400">只有名单内的人可领料</span>
+                        </div>
+                        <textarea id="settingWhitelist" rows="2" placeholder="例如: y, 小明, 小红, 矩阵兼职01, 张三" 
+                            class="w-full p-2 bg-white border border-amber-300 rounded-lg text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"></textarea>
+                    </div>
+
+                    <div class="flex justify-end pt-1">
+                        <button onclick="saveAdminSettings()" class="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm transition">
+                            💾 保存所有设置
+                        </button>
                     </div>
                 </div>
 
@@ -1114,51 +1173,6 @@ INDEX_HTML = """
                                 <span>🚀 保存单组并派入素材池</span>
                             </button>
                         </div>
-                    </div>
-                </div>
-
-                <!-- Security & Anti-Cheat Settings Card -->
-                <div class="p-4 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="font-bold text-xs text-amber-900 flex items-center space-x-1.5 uppercase tracking-wider">
-                            <span>🔐</span>
-                            <span>防作弊与素材消耗规则</span>
-                        </h3>
-                        <span class="text-[10px] text-amber-700 bg-amber-100 px-2 py-0.5 rounded font-semibold">即时生效</span>
-                    </div>
-
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">1. 统一领料口令：</label>
-                            <input type="text" id="settingPasscode" placeholder="如: 8888" 
-                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
-                        </div>
-
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">2. 每日单人领料上限 (篇/天)：</label>
-                            <input type="number" id="settingDailyLimit" min="1" max="20" placeholder="如: 3" 
-                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900">
-                        </div>
-
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 已发作品防复用策略：</label>
-                            <select id="settingAutoDelete" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
-                                <option value="0">标记为【已消耗】(保留记录，绝不再派发任何人)</option>
-                                <option value="1">打卡后【立即自动物理销毁】(完全不留痕迹)</option>
-                            </select>
-                        </div>
-
-                        <div>
-                            <label class="block font-semibold text-slate-700 mb-1">4. 发帖冷却间隔 (分钟)：</label>
-                            <input type="number" id="settingCooldown" min="0" max="720" placeholder="0 表示不限制" 
-                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium text-slate-800">
-                        </div>
-                    </div>
-
-                    <div class="flex justify-end pt-1">
-                        <button onclick="saveAdminSettings()" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm transition">
-                            💾 保存设置
-                        </button>
                     </div>
                 </div>
 
@@ -1375,10 +1389,6 @@ INDEX_HTML = """
                 showToast('请先输入你的姓名或微信昵称！');
                 return;
             }
-            if (!passcode) {
-                showToast('请填写领料口令！');
-                return;
-            }
             saveCredentials();
 
             let xhsLink = '';
@@ -1536,19 +1546,22 @@ INDEX_HTML = """
                 });
                 const data = await res.json();
                 if (data.success) {
-                    document.getElementById('settingPasscode').value = data.passcode;
+                    document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
+                    document.getElementById('settingPasscode').value = data.passcode || '8888';
                     document.getElementById('settingDailyLimit').value = data.daily_limit || 3;
-                    document.getElementById('settingCooldown').value = data.cooldown_minutes || 0;
                     document.getElementById('settingAutoDelete').value = data.auto_delete_consumed ? '1' : '0';
+                    const list = data.whitelist || [];
+                    document.getElementById('settingWhitelist').value = Array.isArray(list) ? list.join(', ') : list;
                 }
             } catch (err) {}
         }
 
         async function saveAdminSettings() {
+            const auth_mode = document.getElementById('settingAuthMode').value;
             const passcode = document.getElementById('settingPasscode').value.trim();
             const daily_limit = document.getElementById('settingDailyLimit').value.trim();
-            const cooldown = document.getElementById('settingCooldown').value.trim();
             const auto_delete = document.getElementById('settingAutoDelete').value === '1';
+            const whitelist_raw = document.getElementById('settingWhitelist').value.trim();
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1558,10 +1571,11 @@ INDEX_HTML = """
                         'X-Admin-Password': adminAuthToken
                     },
                     body: JSON.stringify({
+                        auth_mode: auth_mode,
                         passcode: passcode,
                         daily_limit: daily_limit,
-                        cooldown_minutes: cooldown,
-                        auto_delete_consumed: auto_delete
+                        auto_delete_consumed: auto_delete,
+                        whitelist: whitelist_raw
                     })
                 });
                 const data = await res.json();
