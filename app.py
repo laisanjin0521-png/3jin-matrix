@@ -630,6 +630,44 @@ def admin_settings():
         'whitelist': whitelist
     })
 
+@app.route('/api/admin/whitelist/add', methods=['POST'])
+def admin_whitelist_add():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    data = request.json or {}
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': '姓名不能为空'})
+    whitelist_str = get_setting('whitelist', '[]')
+    try:
+        whitelist = json.loads(whitelist_str)
+    except:
+        whitelist = []
+    if name not in whitelist:
+        whitelist.append(name)
+        set_setting('whitelist', json.dumps(whitelist, ensure_ascii=False))
+    return jsonify({'success': True, 'whitelist': whitelist, 'message': f'已成功添加【{name}】至白名单！'})
+
+@app.route('/api/admin/whitelist/remove', methods=['POST'])
+def admin_whitelist_remove():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    data = request.json or {}
+    name = data.get('name', '').strip()
+    whitelist_str = get_setting('whitelist', '[]')
+    try:
+        whitelist = json.loads(whitelist_str)
+    except:
+        whitelist = []
+    if name in whitelist:
+        whitelist = [n for n in whitelist if n != name]
+        set_setting('whitelist', json.dumps(whitelist, ensure_ascii=False))
+    return jsonify({'success': True, 'whitelist': whitelist, 'message': f'已将【{name}】移出白名单'})
+
 @app.route('/api/admin/submissions/toggle_settlement', methods=['POST'])
 def admin_toggle_settlement():
     admin_pwd = request.headers.get('X-Admin-Password', '')
@@ -1770,7 +1808,7 @@ INDEX_HTML = """
             `).join('');
         }
 
-        function addWhitelistItem(customName) {
+        async function addWhitelistItem(customName) {
             const input = document.getElementById('newWhitelistItemInput');
             const name = (customName || input.value).trim();
             if (!name) {
@@ -1781,18 +1819,50 @@ INDEX_HTML = """
                 showToast(`【${name}】已在白名单中！`);
                 return;
             }
-            currentWhitelist.push(name);
-            if (!customName) input.value = '';
-            renderWhitelistTags();
-            saveAdminSettingsSilently();
-            showToast(`已添加【${name}】至白名单！`);
+            try {
+                const res = await fetch('/api/admin/whitelist/add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({ name: name })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentWhitelist = data.whitelist;
+                    if (!customName) input.value = '';
+                    renderWhitelistTags();
+                    showToast(data.message);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('添加白名单失败');
+            }
         }
 
-        function removeWhitelistItem(name) {
-            currentWhitelist = currentWhitelist.filter(item => item !== name);
-            renderWhitelistTags();
-            saveAdminSettingsSilently();
-            showToast(`已将【${name}】从白名单移除`);
+        async function removeWhitelistItem(name) {
+            try {
+                const res = await fetch('/api/admin/whitelist/remove', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({ name: name })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentWhitelist = data.whitelist;
+                    renderWhitelistTags();
+                    showToast(data.message);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('删除失败');
+            }
         }
 
         async function loadAdminSettings() {
@@ -1826,8 +1896,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        claim_timeout_hours: timeout_hours,
-                        whitelist: currentWhitelist
+                        claim_timeout_hours: timeout_hours
                     })
                 });
             } catch (err) {}
@@ -1848,8 +1917,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        claim_timeout_hours: timeout_hours,
-                        whitelist: currentWhitelist
+                        claim_timeout_hours: timeout_hours
                     })
                 });
                 const data = await res.json();
