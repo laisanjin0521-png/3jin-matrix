@@ -16,7 +16,134 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MATERIALS_DIR = os.path.join(PROJECT_ROOT, 'materials')
 
+# Turso Cloud Database Configuration (AWS Tokyo)
+TURSO_DATABASE_URL = os.environ.get(
+    "TURSO_DATABASE_URL",
+    "https://thomas-jin-laisanjin0521-png.aws-ap-northeast-1.turso.io/v2/pipeline"
+)
+TURSO_AUTH_TOKEN = os.environ.get(
+    "TURSO_AUTH_TOKEN",
+    "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgzODE2NzgsImlkIjoiMDFhMDYzZDktYjgwMS03MzZhLWFiYzYtYzZlYTA4OGU3Mjc4Iiwia2lkIjoiV2lzLXRta2xiQ1BZX0YwcXBEYTVDbzA5ZTJUWXhUSkFrWUl5b2NaYWdqdyIsInJpZCI6IjQ2NWRkNGYzLWIzNTUtNGNiOS05Yjk5LTIzMzhhYjgzMmMwOCJ9.Clkqlm5HEMhyLNS3r6ygb4KSoeM1VZEZPFzp5Gd-YWjh9GOftx2zDjDL9ZqZFSZM43XTUTTIVL0CGIFmtZZkAQ"
+)
+
+class TursoRow(dict):
+    def __init__(self, cols, values):
+        super().__init__()
+        self._cols = cols
+        self._values = values
+        for c, v in zip(cols, values):
+            self[c] = v
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return self._values[item]
+        return super().__getitem__(item)
+
+    def keys(self):
+        return self._cols
+
+class TursoCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.description = None
+        self._rows = []
+        self._row_idx = 0
+        self.rowcount = 0
+        self.lastrowid = None
+
+    def execute(self, sql, params=()):
+        args = []
+        for p in params:
+            if p is None:
+                args.append({"type": "null"})
+            elif isinstance(p, int):
+                args.append({"type": "integer", "value": str(p)})
+            elif isinstance(p, float):
+                args.append({"type": "float", "value": p})
+            elif isinstance(p, bytes):
+                args.append({"type": "blob", "base64": base64.b64encode(p).decode()})
+            else:
+                args.append({"type": "text", "value": str(p)})
+        
+        stmt = {"sql": sql}
+        if args:
+            stmt["args"] = args
+
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": stmt},
+                {"type": "close"}
+            ]
+        }
+        
+        req = urllib.request.Request(
+            TURSO_DATABASE_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+            method="POST"
+        )
+        
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            
+        res = data["results"][0]
+        if res["type"] == "error":
+            raise RuntimeError(res["error"]["message"])
+            
+        exec_res = res["response"]["result"]
+        cols = [c["name"] for c in exec_res.get("cols", [])]
+        self.description = [(c, None, None, None, None, None, None) for c in cols]
+        self.rowcount = exec_res.get("affected_row_count", 0)
+        last_id = exec_res.get("last_insert_rowid")
+        self.lastrowid = int(last_id) if last_id is not None else None
+        
+        rows = []
+        for r in exec_res.get("rows", []):
+            vals = []
+            for cell in r:
+                t = cell.get("type")
+                if t == "null":
+                    vals.append(None)
+                elif t == "integer":
+                    vals.append(int(cell["value"]))
+                elif t == "float":
+                    vals.append(float(cell["value"]))
+                elif t == "blob":
+                    vals.append(base64.b64decode(cell["base64"]))
+                else:
+                    vals.append(cell.get("value"))
+            rows.append(TursoRow(cols, vals))
+            
+        self._rows = rows
+        self._row_idx = 0
+        return self
+
+    def fetchone(self):
+        if self._row_idx < len(self._rows):
+            r = self._rows[self._row_idx]
+            self._row_idx += 1
+            return r
+        return None
+
+    def fetchall(self):
+        r = self._rows[self._row_idx:]
+        self._row_idx = len(self._rows)
+        return r
+
+class TursoConn:
+    def cursor(self):
+        return TursoCursor(self)
+    def commit(self):
+        pass
+    def close(self):
+        pass
+
 def get_db():
+    if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+        try:
+            return TursoConn()
+        except Exception:
+            pass
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -90,7 +217,7 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[\"y\", \"小明\", \"小红\"]')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('claim_timeout_hours', '2')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
@@ -1495,7 +1622,7 @@ INDEX_HTML = """
     <script>
         let currentMaterialData = null;
         let adminAuthToken = localStorage.getItem('xhs_admin_pwd') || '';
-        let currentWhitelist = ['y', '小明', '小红'];
+        let currentWhitelist = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
 
         window.addEventListener('DOMContentLoaded', () => {
             const savedName = localStorage.getItem('xhs_distributor_name') || '';
@@ -1831,6 +1958,7 @@ INDEX_HTML = """
                 const data = await res.json();
                 if (data.success) {
                     currentWhitelist = data.whitelist;
+                    localStorage.setItem('saved_admin_whitelist', JSON.stringify(currentWhitelist));
                     if (!customName) input.value = '';
                     renderWhitelistTags();
                     showToast(data.message);
@@ -1855,6 +1983,7 @@ INDEX_HTML = """
                 const data = await res.json();
                 if (data.success) {
                     currentWhitelist = data.whitelist;
+                    localStorage.setItem('saved_admin_whitelist', JSON.stringify(currentWhitelist));
                     renderWhitelistTags();
                     showToast(data.message);
                 } else {
@@ -1875,7 +2004,18 @@ INDEX_HTML = """
                     document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
                     document.getElementById('settingPasscode').value = data.passcode || '8888';
                     document.getElementById('settingTimeoutHours').value = data.claim_timeout_hours || 2;
-                    currentWhitelist = Array.isArray(data.whitelist) ? data.whitelist : [];
+                    
+                    const localCached = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
+                    const serverList = Array.isArray(data.whitelist) ? data.whitelist : [];
+                    
+                    if (serverList.length === 0 && localCached.length > 0) {
+                        // If server rebooted/emptied, auto-restore local cached whitelist to server
+                        currentWhitelist = localCached;
+                        saveAdminSettingsSilently();
+                    } else {
+                        currentWhitelist = serverList;
+                        localStorage.setItem('saved_admin_whitelist', JSON.stringify(currentWhitelist));
+                    }
                     renderWhitelistTags();
                 }
             } catch (err) {}
@@ -1896,7 +2036,8 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        claim_timeout_hours: timeout_hours
+                        claim_timeout_hours: timeout_hours,
+                        whitelist: currentWhitelist
                     })
                 });
             } catch (err) {}
@@ -1917,7 +2058,8 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         passcode: passcode,
-                        claim_timeout_hours: timeout_hours
+                        claim_timeout_hours: timeout_hours,
+                        whitelist: currentWhitelist
                     })
                 });
                 const data = await res.json();
