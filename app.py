@@ -29,10 +29,10 @@ def init_db():
         group_name TEXT UNIQUE,
         title TEXT,
         folder_path TEXT,
-        images_json TEXT, -- JSON array of file paths or base64 data URIs
+        images_json TEXT,
         copy_text TEXT,
         last_tag TEXT,
-        status TEXT DEFAULT 'available', -- 'available', 'assigned', 'completed'
+        status TEXT DEFAULT 'available',
         assigned_to TEXT,
         assigned_at TEXT,
         created_at TEXT
@@ -540,7 +540,6 @@ def admin_settings():
 
 @app.route('/api/admin/materials/add', methods=['POST'])
 def admin_add_material():
-    """3 separate image slots or batch array support."""
     admin_pwd = request.headers.get('X-Admin-Password', '')
     real_pwd = get_setting('admin_password', '060521').strip()
     if admin_pwd != real_pwd:
@@ -589,6 +588,60 @@ def admin_add_material():
     except sqlite3.IntegrityError:
         conn.close()
         return jsonify({'success': False, 'error': f'素材组名【{group_name}】已存在，请换一个名称！'})
+
+@app.route('/api/admin/materials/batch_add', methods=['POST'])
+def admin_batch_add():
+    """Batch assembler: Coworker drops 10-50 covers, 10-50 contents, 10-50 tails + texts."""
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+
+    data = request.json or {}
+    covers = data.get('covers', []) # list of b64
+    contents = data.get('contents', []) # list of b64
+    tails = data.get('tails', []) # list of b64
+    copies = data.get('copies', []) # list of strings
+    prefix = data.get('prefix', '批量作品_').strip()
+    
+    if not covers or len(covers) == 0:
+        return jsonify({'success': False, 'error': '请至少上传一批【图1 · 封面图】！'})
+    if not copies or len(copies) == 0:
+        return jsonify({'success': False, 'error': '请至少提供一组文案！'})
+        
+    count = min(len(covers), len(copies))
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    success_count = 0
+    
+    for i in range(count):
+        g_name = f"{prefix}第{i+1:02d}组_{datetime.datetime.now().strftime('%m%d_%H%M%S')}_{i+1}"
+        copy = copies[i].strip()
+        first_line = copy.split('\n')[0].strip()
+        title = first_line[:30] if first_line else g_name
+        last_tag = extract_last_tag(copy)
+        
+        imgs = []
+        if i < len(covers): imgs.append(covers[i])
+        if i < len(contents): imgs.append(contents[i])
+        elif len(contents) > 0: imgs.append(contents[0]) # reuse if 1 common content
+        if i < len(tails): imgs.append(tails[i])
+        elif len(tails) > 0: imgs.append(tails[0]) # reuse common tail
+        
+        try:
+            cursor.execute("""
+            INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+            VALUES (?, ?, 'cloud_batch', ?, ?, ?, 'available', ?)
+            """, (g_name, title, json.dumps(imgs, ensure_ascii=False), copy, last_tag, now_str))
+            success_count += 1
+        except Exception:
+            pass
+            
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品！'})
 
 @app.route('/api/admin/materials/delete', methods=['POST'])
 def admin_delete_material():
@@ -902,7 +955,7 @@ INDEX_HTML = """
                     <span class="text-xl">👑</span>
                     <div>
                         <h2 class="font-bold text-base">3金 的矩阵管理后台</h2>
-                        <p class="text-xs text-slate-400">3个独立实况上传口 · 团队协同 · 彻底防复用</p>
+                        <p class="text-xs text-slate-400">支持单篇/批量极速入库 · 团队协同 · 彻底防复用</p>
                     </div>
                 </div>
                 <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
@@ -927,19 +980,75 @@ INDEX_HTML = """
                     </div>
                 </div>
 
-                <!-- 3 SEPARATE IMAGE UPLOAD PORTS FORM -->
-                <div class="p-4 bg-emerald-50/80 rounded-2xl border border-emerald-200 space-y-4">
-                    <div class="flex items-center justify-between border-b border-emerald-200/60 pb-2.5">
-                        <div class="flex items-center space-x-1.5">
-                            <span class="text-lg">📸</span>
-                            <h3 class="font-bold text-xs text-emerald-900 uppercase tracking-wider">
-                                团队协同上传：3 张图独立实况/图片上传口
-                            </h3>
-                        </div>
-                        <span class="text-[10px] text-emerald-800 bg-emerald-200/80 px-2 py-0.5 rounded font-bold">支持实况/视频/图片</span>
+                <!-- UPLOAD TABS CONTAINER -->
+                <div class="border border-emerald-200 bg-emerald-50/70 rounded-2xl p-4 space-y-3">
+                    <!-- Tab Switcher -->
+                    <div class="flex items-center space-x-2 border-b border-emerald-200/80 pb-3">
+                        <button onclick="switchUploadTab('batch')" id="tabBtnBatch" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white shadow-sm transition">
+                            ⚡️ 【批量图库拼装】(同事多选图1/图2/图3，一键生成几十组)
+                        </button>
+                        <button onclick="switchUploadTab('single')" id="tabBtnSingle" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
+                            📌 【单组精准上传】
+                        </button>
                     </div>
 
-                    <div class="space-y-3 text-xs">
+                    <!-- TAB 1: BATCH AUTO ASSEMBLER -->
+                    <div id="batchUploadPanel" class="space-y-3 text-xs">
+                        <div class="p-2.5 bg-white/90 rounded-xl border border-emerald-200 text-emerald-900 leading-relaxed text-[11px]">
+                            💡 <strong>批量拼装玩法</strong>：让同事在【图1】多选 20 张封面实况，在【图2】多选 20 张内容，在【图3】选尾图，下方粘贴 20 段文案（用 <code>===</code> 分隔），点击按钮系统<strong>1 秒自动拼装生成 20 组独家作品！</strong>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <!-- Batch Slot 1 -->
+                            <div class="bg-white p-3 rounded-xl border border-emerald-300 space-y-1.5">
+                                <div class="font-bold text-emerald-800 flex items-center justify-between">
+                                    <span>🖼️ 批量选【图1·封面图】</span>
+                                    <span id="batchCount1" class="text-[10px] text-emerald-600 font-normal">已选 0 张</span>
+                                </div>
+                                <input type="file" id="batchSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(1)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
+                            </div>
+
+                            <!-- Batch Slot 2 -->
+                            <div class="bg-white p-3 rounded-xl border border-blue-300 space-y-1.5">
+                                <div class="font-bold text-blue-800 flex items-center justify-between">
+                                    <span>🖼️ 批量选【图2·内容图】</span>
+                                    <span id="batchCount2" class="text-[10px] text-blue-600 font-normal">已选 0 张</span>
+                                </div>
+                                <input type="file" id="batchSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(2)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
+                            </div>
+
+                            <!-- Batch Slot 3 -->
+                            <div class="bg-white p-3 rounded-xl border border-amber-300 space-y-1.5">
+                                <div class="font-bold text-amber-800 flex items-center justify-between">
+                                    <span>🖼️ 批量选【图3·尾图】</span>
+                                    <span id="batchCount3" class="text-[10px] text-amber-600 font-normal">已选 0 张</span>
+                                </div>
+                                <input type="file" id="batchSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(3)"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-amber-600 file:text-white cursor-pointer">
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">
+                                批量文案池 (每篇文案用三个等号 <code>===</code> 隔开，第一行自动作为标题)：
+                            </label>
+                            <textarea id="batchCopyInput" rows="5" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;第三篇文案内容..." 
+                                class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs font-mono"></textarea>
+                        </div>
+
+                        <div class="flex items-center justify-between pt-1">
+                            <input type="text" id="batchPrefix" placeholder="组名前缀 (如: 代运营矩阵_)" value="代运营矩阵_"
+                                class="px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs w-48 font-medium">
+                            <button onclick="submitBatchMaterials()" id="batchSubmitBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
+                                <span>⚡️ 一键批量自动组装并入库</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- TAB 2: SINGLE SLOT UPLOAD -->
+                    <div id="singleUploadPanel" class="space-y-3 text-xs hidden">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">作品组名 / 标题：</label>
                             <input type="text" id="newGroupInput" placeholder="例如: 第13组_8年单干老手聊聊代运营" 
@@ -948,8 +1057,7 @@ INDEX_HTML = """
 
                         <!-- 3 SEPARATE UPLOAD SLOTS -->
                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                            <!-- Slot 1: Cover -->
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 transition space-y-2 flex flex-col justify-between">
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-emerald-300 space-y-2 flex flex-col justify-between">
                                 <div>
                                     <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
                                         <span class="text-emerald-700">🖼️ 图1 · 封面图</span>
@@ -959,13 +1067,12 @@ INDEX_HTML = """
                                 </div>
                                 <input type="file" id="slot1File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(1)"
                                     class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
-                                <div id="slot1Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                <div id="slot1Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
                                     待选图1
                                 </div>
                             </div>
 
-                            <!-- Slot 2: Content -->
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-blue-300 hover:border-blue-500 transition space-y-2 flex flex-col justify-between">
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-blue-300 space-y-2 flex flex-col justify-between">
                                 <div>
                                     <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
                                         <span class="text-blue-700">🖼️ 图2 · 内容图</span>
@@ -975,13 +1082,12 @@ INDEX_HTML = """
                                 </div>
                                 <input type="file" id="slot2File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(2)"
                                     class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
-                                <div id="slot2Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                <div id="slot2Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
                                     待选图2
                                 </div>
                             </div>
 
-                            <!-- Slot 3: Tail image -->
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-amber-300 hover:border-amber-500 transition space-y-2 flex flex-col justify-between">
+                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-amber-300 space-y-2 flex flex-col justify-between">
                                 <div>
                                     <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
                                         <span class="text-amber-700">🖼️ 图3 · 尾图</span>
@@ -991,23 +1097,23 @@ INDEX_HTML = """
                                 </div>
                                 <input type="file" id="slot3File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(3)"
                                     class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-amber-600 file:text-white cursor-pointer">
-                                <div id="slot3Preview" class="h-20 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                <div id="slot3Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
                                     待选图3
                                 </div>
                             </div>
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">发布文案 (第一行自动作为标题，末尾附带 #城市代运营 等Tag)：</label>
-                            <textarea id="newCopyInput" rows="3" placeholder="粘贴文案内容..." 
+                            <label class="block font-semibold text-slate-700 mb-1">发布文案：</label>
+                            <textarea id="newCopyInput" rows="3" placeholder="粘贴单篇文案..." 
                                 class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs"></textarea>
                         </div>
-                    </div>
 
-                    <div class="flex justify-end pt-1">
-                        <button onclick="submit3SlotsMaterial()" id="add3SlotsBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
-                            <span>🚀 确认保存并派入素材池</span>
-                        </button>
+                        <div class="flex justify-end pt-1">
+                            <button onclick="submit3SlotsMaterial()" id="add3SlotsBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
+                                <span>🚀 保存单组并派入素材池</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -1394,6 +1500,35 @@ INDEX_HTML = """
             }
         }
 
+        function switchUploadTab(tab) {
+            const batchP = document.getElementById('batchUploadPanel');
+            const singleP = document.getElementById('singleUploadPanel');
+            const batchB = document.getElementById('tabBtnBatch');
+            const singleB = document.getElementById('tabBtnSingle');
+            if (tab === 'batch') {
+                batchP.classList.remove('hidden');
+                singleP.classList.add('hidden');
+                batchB.classList.replace('bg-white', 'bg-emerald-600');
+                batchB.classList.replace('text-slate-700', 'text-white');
+                singleB.classList.replace('bg-emerald-600', 'bg-white');
+                singleB.classList.replace('text-white', 'text-slate-700');
+            } else {
+                batchP.classList.add('hidden');
+                singleP.classList.remove('hidden');
+                singleB.classList.replace('bg-white', 'bg-emerald-600');
+                singleB.classList.replace('text-slate-700', 'text-white');
+                batchB.classList.replace('bg-emerald-600', 'bg-white');
+                batchB.classList.replace('text-white', 'text-slate-700');
+            }
+        }
+
+        function updateBatchCount(slot) {
+            const input = document.getElementById(`batchSlot${slot}`);
+            const span = document.getElementById(`batchCount${slot}`);
+            const count = input.files ? input.files.length : 0;
+            span.innerText = `已选 ${count} 张`;
+        }
+
         async function loadAdminSettings() {
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -1525,7 +1660,77 @@ INDEX_HTML = """
             } catch (err) {
                 showToast('上传失败');
             } finally {
-                btn.innerHTML = '<span>🚀 确认保存并派入素材池</span>';
+                btn.innerHTML = '<span>🚀 保存单组并派入素材池</span>';
+                btn.disabled = false;
+            }
+        }
+
+        async function submitBatchMaterials() {
+            const f1_files = document.getElementById('batchSlot1').files;
+            const f2_files = document.getElementById('batchSlot2').files;
+            const f3_files = document.getElementById('batchSlot3').files;
+            const raw_copy = document.getElementById('batchCopyInput').value.trim();
+            const prefix = document.getElementById('batchPrefix').value.trim() || '批量矩阵_';
+
+            if (!f1_files || f1_files.length === 0) {
+                showToast('请至少在【图1·封面图】选择一批实况/图片！');
+                return;
+            }
+            if (!raw_copy) {
+                showToast('请在文案池中粘贴文案内容！');
+                return;
+            }
+
+            const copies = raw_copy.split(/===+|\n---+\n/).map(c => c.trim()).filter(c => c.length > 0);
+            if (copies.length === 0) {
+                showToast('未能识别到有效文案，请用 === 分隔多篇文案！');
+                return;
+            }
+
+            const btn = document.getElementById('batchSubmitBtn');
+            btn.innerHTML = '<span>⏳ 正在批量极速组装入库...</span>';
+            btn.disabled = true;
+
+            const b64_1 = [];
+            for (let i = 0; i < f1_files.length; i++) b64_1.push(await fileToBase64(f1_files[i]));
+            const b64_2 = [];
+            for (let i = 0; i < f2_files.length; i++) b64_2.push(await fileToBase64(f2_files[i]));
+            const b64_3 = [];
+            for (let i = 0; i < f3_files.length; i++) b64_3.push(await fileToBase64(f3_files[i]));
+
+            try {
+                const res = await fetch('/api/admin/materials/batch_add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        covers: b64_1,
+                        contents: b64_2,
+                        tails: b64_3,
+                        copies: copies,
+                        prefix: prefix
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    document.getElementById('batchSlot1').value = '';
+                    document.getElementById('batchSlot2').value = '';
+                    document.getElementById('batchSlot3').value = '';
+                    document.getElementById('batchCopyInput').value = '';
+                    updateBatchCount(1);
+                    updateBatchCount(2);
+                    updateBatchCount(3);
+                    loadAdminData();
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('批量上传失败');
+            } finally {
+                btn.innerHTML = '<span>⚡️ 一键批量自动组装并入库</span>';
                 btn.disabled = false;
             }
         }
