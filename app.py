@@ -361,8 +361,13 @@ except Exception:
 def extract_last_tag(copy_text):
     if not copy_text:
         return ''
-    tags = re.findall(r'#[^\s#]+', copy_text)
-    return tags[-1] if tags else ''
+    tags = re.findall(r'[#＃][^\s#＃]+', copy_text)
+    if not tags:
+        return ''
+    last_tag = tags[-1].strip()
+    if last_tag.startswith('＃'):
+        last_tag = '#' + last_tag[1:]
+    return last_tag
 
 def check_worker_auth(user_name, passcode=''):
     auth_mode = get_setting('auth_mode', 'whitelist')
@@ -404,7 +409,7 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
             if any(kw in html for kw in ['审核中', '正在审核', '笔记审核中', '仅自己可见', '仅作者可见', '作者正在修改', '作品处理中']):
                 return True, "", fetched_title or "⏳ 官方审核中笔记", True, "in_review"
             
-            tag_clean = expected_tag.replace('#', '').strip() if expected_tag else ''
+            tag_clean = expected_tag.replace('#', '').replace('＃', '').strip() if expected_tag else ''
             tag_found = (tag_clean in html or tag_clean in fetched_title) if tag_clean else True
             
             keywords = [w for w in re.split(r'[\s_，。：:、！!]+', expected_title) if len(w) >= 2]
