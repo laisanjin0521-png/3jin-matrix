@@ -18,6 +18,27 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'distributor.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MATERIALS_DIR = os.path.join(PROJECT_ROOT, 'materials')
 
+# Beijing Time (UTC+8) Configuration
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+def get_beijing_now():
+    return datetime.datetime.now(BEIJING_TZ)
+
+def get_beijing_now_str():
+    return get_beijing_now().strftime('%Y-%m-%d %H:%M:%S')
+
+def get_beijing_today_str():
+    return get_beijing_now().strftime('%Y-%m-%d')
+
+def parse_beijing_time(time_str):
+    if not time_str:
+        return None
+    try:
+        dt = datetime.datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+        return dt.replace(tzinfo=BEIJING_TZ)
+    except Exception:
+        return None
+
 # Turso Cloud Database Configuration (AWS Tokyo)
 TURSO_DATABASE_URL = os.environ.get(
     "TURSO_DATABASE_URL",
@@ -253,7 +274,7 @@ def auto_release_expired_assignments():
             return 0
         conn = get_db()
         cursor = conn.cursor()
-        now_dt = datetime.datetime.now()
+        now_dt = get_beijing_now()
         
         cursor.execute("SELECT id, group_name, assigned_to, assigned_at FROM materials WHERE status = 'assigned'")
         assigned_mats = cursor.fetchall()
@@ -261,8 +282,8 @@ def auto_release_expired_assignments():
         for mat in assigned_mats:
             if mat['assigned_at']:
                 try:
-                    assigned_dt = datetime.datetime.strptime(mat['assigned_at'], '%Y-%m-%d %H:%M:%S')
-                    if (now_dt - assigned_dt).total_seconds() > (timeout_hours * 3600):
+                    assigned_dt = parse_beijing_time(mat['assigned_at'])
+                    if assigned_dt and (now_dt - assigned_dt).total_seconds() > (timeout_hours * 3600):
                         cursor.execute("UPDATE materials SET status = 'available', assigned_to = NULL, assigned_at = NULL WHERE id = ?", (mat['id'],))
                         if mat['assigned_to']:
                             cursor.execute("UPDATE users SET current_material_id = NULL WHERE name = ?", (mat['assigned_to'],))
@@ -286,7 +307,7 @@ def auto_inspect_all_submissions_silent():
             conn.close()
             return 0
             
-        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = get_beijing_now_str()
         headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'}
         updated_count = 0
         
@@ -421,7 +442,7 @@ def scan_and_import_materials_from_folder():
     conn = get_db()
     cursor = conn.cursor()
     imported_count = 0
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = get_beijing_now_str()
 
     for group in sorted(os.listdir(target_dir)):
         group_path = os.path.join(target_dir, group)
@@ -584,7 +605,7 @@ def get_user_status():
     cursor.execute('SELECT * FROM submissions WHERE user_name = ? ORDER BY id DESC', (name,))
     subs = [dict(row) for row in cursor.fetchall()]
     
-    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    today_str = get_beijing_today_str()
     cursor.execute('SELECT COUNT(*) FROM submissions WHERE user_name = ? AND submitted_at LIKE ?', (name, f'{today_str}%'))
     today_count = cursor.fetchone()[0]
     
@@ -595,12 +616,13 @@ def get_user_status():
 
     if not current_material and subs and cooldown_min > 0:
         try:
-            last_time = datetime.datetime.strptime(subs[0]['submitted_at'], '%Y-%m-%d %H:%M:%S')
-            diff_sec = (datetime.datetime.now() - last_time).total_seconds()
-            req_sec = cooldown_min * 60
-            if diff_sec < req_sec:
-                in_cooldown = True
-                cooldown_remaining_seconds = int(req_sec - diff_sec)
+            last_time = parse_beijing_time(subs[0]['submitted_at'])
+            if last_time:
+                diff_sec = (get_beijing_now() - last_time).total_seconds()
+                req_sec = cooldown_min * 60
+                if diff_sec < req_sec:
+                    in_cooldown = True
+                    cooldown_remaining_seconds = int(req_sec - diff_sec)
         except Exception:
             pass
 
@@ -638,9 +660,9 @@ def claim_material():
         
     conn = get_db()
     cursor = conn.cursor()
-    now_dt = datetime.datetime.now()
-    now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    today_str = now_dt.strftime('%Y-%m-%d')
+    now_dt = get_beijing_now()
+    now_str = get_beijing_now_str()
+    today_str = get_beijing_today_str()
     
     daily_limit = int(get_setting('daily_limit', '3'))
     cooldown_min = int(get_setting('cooldown_minutes', '60'))
@@ -746,19 +768,20 @@ def claim_material():
         last_sub = cursor.fetchone()
         if last_sub:
             try:
-                last_time = datetime.datetime.strptime(last_sub['submitted_at'], '%Y-%m-%d %H:%M:%S')
-                diff_seconds = (now_dt - last_time).total_seconds()
-                required_seconds = cooldown_min * 60
-                if diff_seconds < required_seconds:
-                    remaining_seconds = int(required_seconds - diff_seconds)
-                    remaining_min = int(remaining_seconds / 60) + 1
-                    conn.close()
-                    return jsonify({
-                        'success': False,
-                        'in_cooldown': True,
-                        'cooldown_remaining_seconds': remaining_seconds,
-                        'error': f'⏳ 小红书养号防限流保护：距离上一篇打卡还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
-                    })
+                last_time = parse_beijing_time(last_sub['submitted_at'])
+                if last_time:
+                    diff_seconds = (now_dt - last_time).total_seconds()
+                    required_seconds = cooldown_min * 60
+                    if diff_seconds < required_seconds:
+                        remaining_seconds = int(required_seconds - diff_seconds)
+                        remaining_min = int(remaining_seconds / 60) + 1
+                        conn.close()
+                        return jsonify({
+                            'success': False,
+                            'in_cooldown': True,
+                            'cooldown_remaining_seconds': remaining_seconds,
+                            'error': f'⏳ 小红书养号防限流保护：距离上一篇打卡还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
+                        })
             except Exception:
                 pass
     
@@ -983,7 +1006,7 @@ def admin_toggle_settlement():
     if not sub_id:
         return jsonify({'success': False, 'error': 'Missing sub_id'})
         
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = get_beijing_now_str()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
@@ -1007,7 +1030,7 @@ def admin_inspect_survival():
     
     inspected_count = 0
     dead_count = 0
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = get_beijing_now_str()
     headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'}
     
     for r in rows:
@@ -1084,7 +1107,7 @@ def admin_add_material():
         title = first_line[:30]
         
     last_tag = extract_last_tag(copy_text)
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = get_beijing_now_str()
     
     conn = get_db()
     cursor = conn.cursor()
@@ -1120,7 +1143,7 @@ def admin_batch_add():
         return jsonify({'success': False, 'error': '请至少提供一组文案！'})
         
     count = min(len(covers), len(copies))
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_str = get_beijing_now_str()
     
     conn = get_db()
     cursor = conn.cursor()
@@ -1192,7 +1215,7 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
 
     conn = get_db()
     cursor = conn.cursor()
-    now_dt = datetime.datetime.now()
+    now_dt = get_beijing_now()
     time_tag = now_dt.strftime('%m%d_%H%M%S')
 
     for i in range(assemble_count):
@@ -1418,7 +1441,7 @@ def export_csv():
         surv_str = "正常存活" if r["survival_status"] == "active" else "已被删/失效" if r["survival_status"] == "dead" else "待巡检"
         csv_content += f'"{r["id"]}","{r["user_name"]}","{r["material_name"]}","{settle_str}","{settle_t}","{surv_str}","{r["xhs_link"]}","{t_str}","{tag_str}","{match_str}","{r["submitted_at"]}"\n'
         
-    filename = f"小红书矩阵打卡与结算总账_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"小红书矩阵打卡与结算总账_{get_beijing_now().strftime('%Y%m%d_%H%M%S')}.csv"
     return Response(
         csv_content,
         mimetype="text/csv",

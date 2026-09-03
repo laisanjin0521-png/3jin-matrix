@@ -10,6 +10,7 @@ import os
 import io
 import json
 import re
+import datetime
 import zipfile
 import subprocess
 
@@ -23,7 +24,7 @@ if os.path.exists(test_db_path):
     except Exception: pass
 app_module.DB_PATH = test_db_path
 
-from app import app, get_db, init_db, INDEX_HTML, check_worker_auth, get_setting, set_setting, auto_inspect_all_submissions_silent
+from app import app, get_db, init_db, INDEX_HTML, check_worker_auth, get_setting, set_setting, auto_inspect_all_submissions_silent, get_beijing_now, get_beijing_now_str, parse_beijing_time
 
 def log_pass(msg):
     print(f"  \033[32m[PASS]\033[0m {msg}", flush=True)
@@ -120,6 +121,16 @@ def run_all_checks():
         if v is None:
             log_fail(f"缺少核心配置项: {k}")
     log_pass("系统核心配置项键值对读取正常")
+
+    # 验证北京时间 (UTC+8) 精准度
+    bj_now = get_beijing_now()
+    if bj_now.tzinfo is None:
+        log_fail("get_beijing_now() 缺少时区信息")
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    diff_h = (bj_now - utc_now).total_seconds() / 3600
+    if abs(diff_h) > 0.05:
+        log_fail(f"北京时间与 UTC 时间差异常: {diff_h}")
+    log_pass(f"北京时间 (UTC+8) 计算精准，当前时间戳: {get_beijing_now_str()}")
 
     # -------------------------------------------------------------
     # 3. 兼职身份鉴权与防作弊规则自检 (白名单/口令/混合模式)
