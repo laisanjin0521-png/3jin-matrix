@@ -12,6 +12,17 @@ import json
 import re
 import zipfile
 import subprocess
+
+# 导入 app 模块并将数据库重定向到完全隔离的高速本地沙箱，保障生产云数据库零污染且毫秒级飞速自检
+import app as app_module
+app_module.TURSO_DATABASE_URL = None
+app_module.TURSO_AUTH_TOKEN = None
+test_db_path = '/tmp/sandbox_verify_matrix.db'
+if os.path.exists(test_db_path):
+    try: os.remove(test_db_path)
+    except Exception: pass
+app_module.DB_PATH = test_db_path
+
 from app import app, get_db, init_db, INDEX_HTML, check_worker_auth, get_setting, set_setting
 
 def log_pass(msg):
@@ -23,10 +34,29 @@ def log_fail(msg):
 
 def run_all_checks():
     print("=" * 65, flush=True)
-    print("🚀 启动【全功能 · 全链路】自动化回归模拟自检程序", flush=True)
+    print("🚀 启动【全功能 · 全链路】自动化回归模拟自检程序（沙箱极速版）", flush=True)
     print("=" * 65, flush=True)
 
-    # 记录初始系统配置以备最后 100% 原样还原
+    # 初始化本地沙箱数据库并注入基准数据
+    init_db()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM materials")
+    if c.fetchone()[0] == 0:
+        c.execute("""
+        INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            '第01组_实体商家小红书获客其实只有这3个阶段',
+            '实体商家小红书获客其实只有这3个阶段',
+            '第01组_实体商家小红书获客其实只有这3个阶段',
+            json.dumps(['第01组/1.png', '第01组/2.jpg', '第01组/3.png']),
+            '实体商家小红书获客秘诀分享 #实体店获客 #小红书运营',
+            '#小红书运营',
+            'available'
+        ))
+        conn.commit()
+
     orig_admin_pwd = '060521'
     orig_security_question = '3金的专属安全暗号是什么？'
     orig_security_answer = '060521'
@@ -34,17 +64,12 @@ def run_all_checks():
     set_setting('admin_security_question', orig_security_question)
     set_setting('admin_security_answer', orig_security_answer)
 
-    orig_auth_mode = get_setting('auth_mode', 'passcode')
-    orig_passcode = get_setting('passcode', '8888')
-    orig_whitelist = get_setting('whitelist', '[]')
-
-    # 清理遗留测试状态
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE name = '自动化测试员'")
-    c.execute("DELETE FROM submissions WHERE user_name = '自动化测试员'")
-    c.execute("UPDATE materials SET status = 'available', assigned_to = NULL, assigned_at = NULL WHERE assigned_to = '自动化测试员'")
-    conn.commit()
+    orig_auth_mode = 'passcode'
+    orig_passcode = '8888'
+    orig_whitelist = '["皮皮", "三金"]'
+    set_setting('auth_mode', orig_auth_mode)
+    set_setting('passcode', orig_passcode)
+    set_setting('whitelist', orig_whitelist)
 
     # -------------------------------------------------------------
     # 1. 前端与 JavaScript 静态完整性自检 (AST 语法分析)
