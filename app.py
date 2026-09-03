@@ -11,9 +11,6 @@ import threading
 import mimetypes
 import urllib.request
 import urllib.error
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from flask import Flask, request, jsonify, send_file, render_template_string, Response, make_response
 
 app = Flask(__name__)
@@ -51,13 +48,6 @@ TURSO_AUTH_TOKEN = os.environ.get(
     "TURSO_AUTH_TOKEN",
     "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgzODE2NzgsImlkIjoiMDFhMDYzZDktYjgwMS03MzZhLWFiYzYtYzZlYTA4OGU3Mjc4Iiwia2lkIjoiV2lzLXRta2xiQ1BZX0YwcXBEYTVDbzA5ZTJUWXhUSkFrWUl5b2NaYWdqdyIsInJpZCI6IjQ2NWRkNGYzLWIzNTUtNGNiOS05Yjk5LTIzMzhhYjgzMmMwOCJ9.Clkqlm5HEMhyLNS3r6ygb4KSoeM1VZEZPFzp5Gd-YWjh9GOftx2zDjDL9ZqZFSZM43XTUTTIVL0CGIFmtZZkAQ"
 )
-
-# High-Performance HTTP Session with Connection Pooling & Keep-Alive for Tokyo Turso Cloud DB
-turso_session = requests.Session()
-retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[502, 503, 504])
-adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retries)
-turso_session.mount("https://", adapter)
-turso_session.mount("http://", adapter)
 
 class TursoRow(dict):
     def __init__(self, cols, values):
@@ -109,24 +99,14 @@ class TursoCursor:
             ]
         }
         
-        try:
-            resp = turso_session.post(
-                TURSO_DATABASE_URL,
-                json=payload,
-                headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
-                timeout=10
-            )
-            data = resp.json()
-        except Exception:
-            # Fallback to urllib if session encounters network hiccup
-            req = urllib.request.Request(
-                TURSO_DATABASE_URL,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=12) as url_resp:
-                data = json.loads(url_resp.read().decode("utf-8"))
+        req = urllib.request.Request(
+            TURSO_DATABASE_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as url_resp:
+            data = json.loads(url_resp.read().decode("utf-8"))
             
         res = data["results"][0]
         if res["type"] == "error":
@@ -3668,10 +3648,14 @@ INDEX_HTML = """
                 } else if (data.error) {
                     adminAuthToken = '';
                     localStorage.removeItem('xhs_admin_pwd');
-                    openAdmin();
+                    document.getElementById('adminModal').classList.add('hidden');
+                    document.getElementById('adminLoginModal').classList.remove('hidden');
+                    showToast(data.error || '管理密码已失效，请重新输入密码！');
                 }
             } catch (err) {
-                showToast('加载管理后台失败');
+                const matBody = document.getElementById('adminMaterialsBody');
+                if (matBody) matBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-red-500 font-bold">⚠️ 加载数据超时，请点击右上角 🔄 刷新库存重试</td></tr>';
+                showToast('加载管理后台失败，请检查网络');
             }
         }
 
