@@ -1425,6 +1425,11 @@ def admin_sync():
 
 @app.route('/api/admin/export_csv', methods=['GET'])
 def export_csv():
+    admin_pwd = request.args.get('token', request.headers.get('X-Admin-Password', '')).strip()
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权访问，请输入管理员密码'}), 401
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT id, user_name, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, settlement_status, settled_at, survival_status, last_inspected_at FROM submissions ORDER BY id DESC')
@@ -1780,7 +1785,12 @@ INDEX_HTML = """
                         <p class="text-xs text-slate-400">白名单标签 · 24h存活巡检 · 结算台账 · 超时释放</p>
                     </div>
                 </div>
-                <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold">&times;</button>
+                <div class="flex items-center space-x-2">
+                    <button onclick="logoutAdmin()" title="安全退出管理后台" class="text-[11px] bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 border border-red-500/30">
+                        <span>🚪 退出登录</span>
+                    </button>
+                    <button onclick="toggleAdminModal()" class="text-slate-400 hover:text-white text-xl font-bold p-1">&times;</button>
+                </div>
             </div>
 
             <!-- Modal Content (Scrollable) -->
@@ -2169,9 +2179,9 @@ INDEX_HTML = """
                             <button onclick="inspectSurvivalStatus()" id="inspectBtn" class="text-[11px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
                                 <span>🔍 24h存活巡检</span>
                             </button>
-                            <a href="/api/admin/export_csv" class="text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
+                            <button onclick="exportAdminCsv()" class="text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
                                 <span>📥 导出 Excel 账单</span>
-                            </a>
+                            </button>
                         </div>
                     </div>
 
@@ -2565,11 +2575,31 @@ INDEX_HTML = """
                 toggleAdminModal();
             } else {
                 document.getElementById('adminLoginModal').classList.remove('hidden');
+                setTimeout(() => {
+                    const el = document.getElementById('adminPwdInput');
+                    if (el) { el.value = ''; el.focus(); }
+                }, 100);
             }
         }
 
         function closeAdminLogin() {
             document.getElementById('adminLoginModal').classList.add('hidden');
+        }
+
+        function logoutAdmin() {
+            adminAuthToken = '';
+            localStorage.removeItem('xhs_admin_pwd');
+            document.getElementById('adminModal').classList.add('hidden');
+            showToast('🚪 已安全退出 3金管理后台');
+        }
+
+        function exportAdminCsv() {
+            if (!adminAuthToken) {
+                showToast('请先验证管理密码');
+                openAdmin();
+                return;
+            }
+            window.open('/api/admin/export_csv?token=' + encodeURIComponent(adminAuthToken), '_blank');
         }
 
         async function verifyAdminLogin() {
@@ -2590,8 +2620,9 @@ INDEX_HTML = """
                     localStorage.setItem('xhs_admin_pwd', pwd);
                     closeAdminLogin();
                     toggleAdminModal();
+                    showToast('🎉 身份验证通过，欢迎进入 3金管理后台！');
                 } else {
-                    showToast(data.error);
+                    showToast(data.error || '管理密码错误，拒绝进入！');
                 }
             } catch (err) {
                 showToast('登录验证异常');
@@ -2601,6 +2632,10 @@ INDEX_HTML = """
         function toggleAdminModal() {
             const modal = document.getElementById('adminModal');
             if (modal.classList.contains('hidden')) {
+                if (!adminAuthToken) {
+                    openAdmin();
+                    return;
+                }
                 modal.classList.remove('hidden');
                 loadAdminData();
                 loadAdminSettings();

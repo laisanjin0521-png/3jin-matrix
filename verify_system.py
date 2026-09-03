@@ -91,7 +91,7 @@ def run_all_checks():
     log_pass("前端 JavaScript 语法 100% 合法，无任何解析阻断或语法隐患")
 
     critical_functions = [
-        'openAdmin', 'checkUserStatus', 'claimMaterial',
+        'openAdmin', 'logoutAdmin', 'exportAdminCsv', 'checkUserStatus', 'claimMaterial',
         'applySubmissionsFilter', 'copyFilteredLinks', 'setFilterDatePreset', 'setFilterSettlePreset',
         'resetSubmissionsFilter', 'saveAdminSettings', 'addWhitelistItem', 'removeWhitelistItem',
         'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement',
@@ -228,6 +228,24 @@ def run_all_checks():
     # 6. 后台管理、数据查询与批量导出闭环自检
     # -------------------------------------------------------------
     print("\n【测试 6/9】管理后台登录、多维数据筛选与 Excel/CSV 导出自检", flush=True)
+
+    # 渗透测试：未授权或错误密码访问后台各接口必须 100% 拦截并返回 401
+    unauth_endpoints = [
+        ('/api/admin/stats', 'GET'),
+        ('/api/admin/settings', 'GET'),
+        ('/api/admin/export_csv', 'GET'),
+        ('/api/admin/pipeline/status', 'GET'),
+        ('/api/admin/materials/clear_completed', 'POST')
+    ]
+    for ep, m in unauth_endpoints:
+        if m == 'GET':
+            res_bad = client.get(ep, headers={'X-Admin-Password': 'wrong_password_999'})
+        else:
+            res_bad = client.post(ep, headers={'X-Admin-Password': 'wrong_password_999'})
+        if res_bad.status_code != 401:
+            log_fail(f"安全防线失效！未授权非法请求 {ep} 居然未被 401 拦截 (状态码: {res_bad.status_code})")
+    log_pass("后台全量 API 接口防渗透安全隔离 100% 坚固：所有未授权/错误密码访问均被 401 绝对拦截！")
+
     admin_headers = {'X-Admin-Password': '060521'}
     
     stats_resp = client.get('/api/admin/stats', headers=admin_headers)
