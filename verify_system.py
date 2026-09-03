@@ -91,7 +91,7 @@ def run_all_checks():
 
     critical_functions = [
         'openAdmin', 'checkUserStatus', 'claimMaterial',
-        'applySubmissionsFilter', 'copyFilteredLinks', 'setFilterDatePreset',
+        'applySubmissionsFilter', 'copyFilteredLinks', 'setFilterDatePreset', 'setFilterSettlePreset',
         'resetSubmissionsFilter', 'saveAdminSettings', 'addWhitelistItem', 'removeWhitelistItem',
         'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement',
         'switchUploadTab', 'refreshPipelineStatus', 'uploadPipelineSlot', 'uploadPipelineCopies', 'clearPipelineBuffer',

@@ -2171,11 +2171,13 @@ INDEX_HTML = """
 
                             <!-- Settlement Filter -->
                             <div>
-                                <label class="block text-[11px] font-semibold text-slate-600 mb-1">💰 结算状态筛选：</label>
+                                <label class="block text-[11px] font-semibold text-slate-600 mb-1">💰 24小时结算状态筛选：</label>
                                 <select id="filterSettleSelect" onchange="applySubmissionsFilter()" class="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
                                     <option value="">-- 全部状态 --</option>
-                                    <option value="unsettled">🟡 待结算</option>
-                                    <option value="settled">🟢 已结算</option>
+                                    <option value="ready_24h">💰 满24小时 · 达标待结钱</option>
+                                    <option value="under_24h">⏳ 24小时观察中 · 未到期</option>
+                                    <option value="unsettled">🟡 全部待结算</option>
+                                    <option value="settled">🟢 全部已结算</option>
                                 </select>
                             </div>
                         </div>
@@ -2183,8 +2185,11 @@ INDEX_HTML = """
                         <!-- Quick Filter Tags & Actions -->
                         <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-100 text-[11px]">
                             <div class="flex items-center gap-1.5 flex-wrap">
-                                <span class="text-slate-400 font-medium">快捷日期:</span>
-                                <button onclick="setFilterDatePreset('all')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">全部</button>
+                                <span class="text-slate-400 font-medium">快捷筛选:</span>
+                                <button onclick="setFilterSettlePreset('ready_24h')" class="px-2 py-0.5 rounded bg-purple-100 hover:bg-purple-200 text-purple-800 font-bold transition shadow-xs">💰 满24H待结</button>
+                                <button onclick="setFilterSettlePreset('under_24h')" class="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold transition shadow-xs">⏳ 24H观察中</button>
+                                <span class="text-slate-300">|</span>
+                                <button onclick="setFilterDatePreset('all')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">全部日期</button>
                                 <button onclick="setFilterDatePreset('today')" class="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold transition">今天</button>
                                 <button onclick="setFilterDatePreset('yesterday')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">昨天</button>
                                 <button onclick="setFilterDatePreset('7days')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">近7天</button>
@@ -2206,12 +2211,12 @@ INDEX_HTML = """
                         <table class="w-full text-xs text-left border-collapse">
                             <thead class="bg-slate-100 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-10 shadow-sm">
                                 <tr>
-                                    <th class="p-2.5">打卡时间</th>
+                                    <th class="p-2.5">发布时间 / 24H结算进度</th>
                                     <th class="p-2.5">兼职人员</th>
                                     <th class="p-2.5">作品组名</th>
                                     <th class="p-2.5">回传小红书链接</th>
-                                    <th class="p-2.5">Tag核验 / 存活</th>
-                                    <th class="p-2.5 text-center">结算操作</th>
+                                    <th class="p-2.5">Tag / 存活状态</th>
+                                    <th class="p-2.5 text-center">24H结算操作</th>
                                 </tr>
                             </thead>
                             <tbody id="adminSubmissionsBody" class="divide-y divide-slate-100">
@@ -2354,21 +2359,42 @@ INDEX_HTML = """
 
             if (user.history && user.history.length > 0) {
                 historyCard.classList.remove('hidden');
-                historyList.innerHTML = user.history.map(item => `
+                const nowTime = new Date();
+                historyList.innerHTML = user.history.map(item => {
+                    let diffHours = 0;
+                    let isPast24H = false;
+                    let remainStr = '';
+                    if (item.submitted_at) {
+                        const subDate = new Date(item.submitted_at.replace(/-/g, '/'));
+                        diffHours = (nowTime - subDate) / (1000 * 60 * 60);
+                        isPast24H = diffHours >= 24;
+                        const remainingHours = Math.max(0, 24 - diffHours);
+                        remainStr = remainingHours < 1 ? Math.round(remainingHours * 60) + '分钟' : remainingHours.toFixed(1) + '小时';
+                    }
+
+                    return `
                     <div class="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between">
                         <div>
                             <div class="font-bold text-slate-800">${item.material_name}</div>
-                            <div class="text-[11px] text-slate-500 mt-0.5 flex items-center space-x-1.5">
+                            <div class="text-[11px] text-slate-500 mt-0.5 flex items-center space-x-1.5 flex-wrap">
                                 <span>🏷️ ${item.tag_expected || '-'}</span>
                                 <span class="text-slate-300">|</span>
                                 <span class="truncate max-w-[140px]">${item.xhs_title || '已打卡'}</span>
                             </div>
-                            <a href="${item.xhs_link}" target="_blank" class="text-blue-600 hover:underline truncate max-w-[220px] block mt-0.5">
+                            <a href="${item.xhs_link}" target="_blank" class="text-blue-600 hover:underline truncate max-w-[220px] block mt-0.5 text-xs">
                                 🔗 ${item.xhs_link}
                             </a>
+                            <div class="mt-1 text-[10px] text-slate-500 flex items-center space-x-1 flex-wrap">
+                                <span>📅 发布: ${item.submitted_at ? item.submitted_at.substring(5, 16) : '-'}</span>
+                                <span class="text-slate-300">·</span>
+                                ${item.settlement_status === 'settled' 
+                                    ? '<span class="text-emerald-700 font-bold">提成已发放结清</span>' 
+                                    : (isPast24H 
+                                        ? '<span class="text-purple-700 font-bold">🎉 满24小时·等待管理员发薪</span>' 
+                                        : `<span class="text-amber-700 font-semibold">⏳ 距24H结算还剩 ${remainStr}</span>`)}
+                            </div>
                         </div>
-                        <div class="text-right text-[11px] text-slate-400 space-y-1">
-                            <div>${item.submitted_at.split(' ')[1]}</div>
+                        <div class="text-right text-[11px] text-slate-400 space-y-1 shrink-0 ml-2">
                             <div class="flex items-center justify-end space-x-1">
                                 ${item.survival_status === 'in_review' 
                                     ? '<span class="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded font-bold">⏳ 审核中</span>' 
@@ -2383,7 +2409,7 @@ INDEX_HTML = """
                             </div>
                         </div>
                     </div>
-                `).join('');
+                `}).join('');
             } else {
                 historyCard.classList.add('hidden');
             }
@@ -3438,8 +3464,17 @@ INDEX_HTML = """
             }
         }
 
+        function setFilterSettlePreset(preset) {
+            const sSelect = document.getElementById('filterSettleSelect');
+            if (sSelect) {
+                sSelect.value = preset;
+                applySubmissionsFilter();
+            }
+        }
+
         function setFilterDatePreset(preset) {
             const dateInput = document.getElementById('filterDateInput');
+            if (!dateInput) return;
             const now = new Date();
             const formatDate = (d) => {
                 const year = d.getFullYear();
@@ -3496,7 +3531,16 @@ INDEX_HTML = """
 
             currentlyFilteredSubmissions = allAdminSubmissions.filter(s => {
                 if (worker && s.user_name !== worker) return false;
-                if (settle && (s.settlement_status || 'unsettled') !== settle) return false;
+
+                const isSettled = s.settlement_status === 'settled';
+                const subDateObj = new Date(s.submitted_at ? s.submitted_at.replace(/-/g, '/') : '');
+                const diffHours = (now - subDateObj) / (1000 * 60 * 60);
+                const isPast24H = diffHours >= 24;
+
+                if (settle === 'ready_24h' && (isSettled || !isPast24H)) return false;
+                if (settle === 'under_24h' && (isSettled || isPast24H)) return false;
+                if (settle === 'unsettled' && isSettled) return false;
+                if (settle === 'settled' && !isSettled) return false;
                 
                 const subDate = s.submitted_at ? s.submitted_at.split(' ')[0] : '';
                 if (presetVal === '7days') {
@@ -3509,9 +3553,10 @@ INDEX_HTML = """
 
             const total = currentlyFilteredSubmissions.length;
             const settledCount = currentlyFilteredSubmissions.filter(s => s.settlement_status === 'settled').length;
-            const unsettledCount = total - settledCount;
+            const ready24Count = currentlyFilteredSubmissions.filter(s => s.settlement_status !== 'settled' && ((now - new Date(s.submitted_at.replace(/-/g, '/'))) / (1000 * 60 * 60)) >= 24).length;
+            const under24Count = total - settledCount - ready24Count;
             if (countBadge) {
-                countBadge.innerText = `共 ${total} 条 (待结 ${unsettledCount} / 已结 ${settledCount})`;
+                countBadge.innerHTML = `共 ${total} 条 (💰 满24H可结: <strong class="text-purple-700 font-black">${ready24Count}</strong> / ⏳ 观察中: ${under24Count} / 🟢 已结: ${settledCount})`;
             }
 
             if (!subBody) return;
@@ -3519,14 +3564,34 @@ INDEX_HTML = """
             if (currentlyFilteredSubmissions.length > 0) {
                 subBody.innerHTML = currentlyFilteredSubmissions.map(s => {
                     const isSettled = s.settlement_status === 'settled';
-                    const survStatus = s.survival_status === 'active' ? '<span class="text-emerald-600 font-bold">🟢 正常存活</span>' :
-                                       s.survival_status === 'dead' ? '<span class="text-red-600 font-bold">🔴 已被删/失效</span>' :
+                    const subDateObj = new Date(s.submitted_at ? s.submitted_at.replace(/-/g, '/') : '');
+                    const diffHours = (now - subDateObj) / (1000 * 60 * 60);
+                    const isPast24H = diffHours >= 24;
+                    const remainingHours = Math.max(0, 24 - diffHours);
+                    const remainStr = remainingHours < 1 ? Math.round(remainingHours * 60) + '分钟' : remainingHours.toFixed(1) + '小时';
+
+                    let timerBadge = '';
+                    if (isSettled) {
+                        timerBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">🟢 提成已结清</span>`;
+                    } else if (isPast24H) {
+                        timerBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-300">💰 满24H·可发薪 (已发${diffHours.toFixed(1)}h)</span>`;
+                    } else {
+                        timerBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">⏳ 观察中 (剩 ${remainStr} 达24H)</span>`;
+                    }
+
+                    const survStatus = s.survival_status === 'active' ? '<span class="text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">🟢 正常存活</span>' :
+                                       s.survival_status === 'dead' ? '<span class="text-red-600 font-bold bg-red-50 px-1.5 py-0.5 rounded border border-red-200">🔴 笔记已失效</span>' :
+                                       s.survival_status === 'in_review' ? '<span class="text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">⏳ 官方审核中</span>' :
                                        '<span class="text-slate-400">待巡检</span>';
+
                     const tagInfo = s.tag_matched === 1 ? `<span class="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="${s.tag_expected || ''}">✅ 已核Tag</span>` :
                                                           `<span class="text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200" title="${s.tag_expected || ''}">⚠️ Tag待查</span>`;
                     return `
                         <tr class="hover:bg-blue-50/50 transition">
-                            <td class="p-2.5 text-slate-500 whitespace-nowrap font-mono text-[11px]">${s.submitted_at ? s.submitted_at.substring(5, 16) : '-'}</td>
+                            <td class="p-2.5 whitespace-nowrap">
+                                <div class="font-mono text-[11px] font-bold text-slate-800">${s.submitted_at ? s.submitted_at.substring(5, 16) : '-'}</div>
+                                <div class="mt-0.5">${timerBadge}</div>
+                            </td>
                             <td class="p-2.5 font-bold text-slate-900 whitespace-nowrap">
                                 <span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 border border-slate-200">${s.user_name}</span>
                             </td>
@@ -3549,8 +3614,8 @@ INDEX_HTML = """
                             </td>
                             <td class="p-2.5 text-center whitespace-nowrap">
                                 <button onclick="toggleSettlement(${s.id}, '${s.settlement_status || 'unsettled'}')" 
-                                    class="px-2.5 py-1 rounded-full text-[11px] font-bold transition shadow-sm ${isSettled ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300' : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300'}">
-                                    <span>${isSettled ? '🟢 已结算' : '🟡 待结算'}</span>
+                                    class="px-2.5 py-1 rounded-full text-[11px] font-bold transition shadow-sm ${isSettled ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300' : (isPast24H ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-600/30 font-extrabold' : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300')}">
+                                    <span>${isSettled ? '🟢 已结算' : (isPast24H ? '💰 满24H·点击结钱' : '🟡 待结算')}</span>
                                 </button>
                             </td>
                         </tr>
