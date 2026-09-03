@@ -279,8 +279,8 @@ def extract_last_tag(copy_text):
     tags = re.findall(r'#[^\s#]+', copy_text)
     return tags[-1] if tags else ''
 
-def check_worker_auth(user_name, passcode):
-    auth_mode = get_setting('auth_mode', 'passcode')
+def check_worker_auth(user_name, passcode=''):
+    auth_mode = get_setting('auth_mode', 'whitelist')
     real_passcode = get_setting('passcode', '8888').strip()
     whitelist_str = get_setting('whitelist', '[]')
     try:
@@ -296,8 +296,8 @@ def check_worker_auth(user_name, passcode):
             return False, "领料口令错误！请向 3金 索取正确口令。"
             
     if auth_mode in ('whitelist', 'both'):
-        if user_name not in whitelist:
-            return False, f"⚠️ 未授权的分发人员【{user_name}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
+        if not user_name or user_name.strip() not in whitelist:
+            return False, f"⚠️ 未授权的分发人员【{user_name or '匿名'}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
             
     return True, ""
 
@@ -749,7 +749,7 @@ def admin_settings():
     return jsonify({
         'success': True,
         'passcode': get_setting('passcode', '8888'),
-        'auth_mode': get_setting('auth_mode', 'passcode'),
+        'auth_mode': get_setting('auth_mode', 'whitelist'),
         'daily_limit': get_setting('daily_limit', '3'),
         'claim_timeout_hours': get_setting('claim_timeout_hours', '2'),
         'cooldown_minutes': get_setting('cooldown_minutes', '0'),
@@ -1359,31 +1359,23 @@ INDEX_HTML = """
             <div class="flex items-center justify-between pb-2.5 border-b border-slate-100">
                 <div class="flex items-center space-x-1.5">
                     <span class="text-base">🔐</span>
-                    <span class="font-bold text-sm text-slate-800">分发人员身份与口令验证</span>
+                    <span class="font-bold text-sm text-slate-800">分发人员身份验证</span>
                 </div>
                 <div id="completedBadge" class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-100 hidden">
                     今日已打卡 <span id="todayCountSpan">0</span>/<span id="dailyLimitSpan">3</span> 组
                 </div>
             </div>
 
-            <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div>
-                    <label class="block text-[11px] font-semibold text-slate-500 mb-1">分发人姓名 / 微信昵称：</label>
-                    <input type="text" id="userNameInput" placeholder="例如: y / 小明" 
+            <div class="mt-3">
+                <label class="block text-[11px] font-semibold text-slate-500 mb-1">分发人姓名 / 微信昵称（白名单人员）：</label>
+                <div class="flex items-center space-x-2">
+                    <input type="text" id="userNameInput" placeholder="请输入你的姓名 / 微信昵称 (如: 皮皮 / 三金)" 
                         class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"
-                        oninput="saveCredentials()">
+                        oninput="saveCredentials()" onkeydown="if(event.key==='Enter') checkUserStatus()">
+                    <button onclick="checkUserStatus()" class="shrink-0 px-4 py-2 text-xs bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold transition shadow-sm">
+                        🔐 验证并同步
+                    </button>
                 </div>
-                <div>
-                    <label class="block text-[11px] font-semibold text-slate-500 mb-1">领料口令 / 工号：</label>
-                    <input type="password" id="passcodeInput" placeholder="请输入领料口令" 
-                        class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"
-                        oninput="saveCredentials()">
-                </div>
-            </div>
-            <div class="mt-2.5 flex justify-end">
-                <button onclick="checkUserStatus()" class="px-4 py-2 text-xs bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold transition shadow-sm">
-                    🔐 验证并同步状态
-                </button>
             </div>
         </div>
 
@@ -1397,7 +1389,7 @@ INDEX_HTML = """
             <!-- State 1: No active task, can claim first task -->
             <div id="firstClaimBox" class="mt-3 space-y-3">
                 <div class="p-3 bg-amber-50 rounded-xl border border-amber-200/60 text-xs text-amber-800 leading-relaxed">
-                    📌 <strong>领料说明</strong>：输入姓名与口令后，点击下方按钮即可领取专属独家发布素材（每组素材独家派发，不重复使用）！
+                    📌 <strong>领料说明</strong>：输入姓名后，点击下方按钮即可领取专属独家发布素材（每组素材独家派发，不重复使用）！
                 </div>
                 <button onclick="claimMaterial(false)" class="w-full py-3.5 xhs-gradient hover:opacity-95 text-white rounded-xl font-bold text-sm shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2">
                     <span>🎁 领取第 1 组独家素材</span>
@@ -1683,16 +1675,16 @@ INDEX_HTML = """
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">1. 领料验证模式：</label>
                             <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
-                                <option value="passcode">🔑 仅验证口令 (默认)</option>
-                                <option value="whitelist">📋 仅验证白名单</option>
-                                <option value="both">🔒 双重验证 (最严格)</option>
-                                <option value="none">🌐 开放模式</option>
+                                <option value="whitelist">📋 仅白名单授权 (默认/推荐)</option>
+                                <option value="passcode">🔑 仅验证口令</option>
+                                <option value="both">🔒 双重验证 (白名单+口令)</option>
+                                <option value="none">🌐 完全开放模式 (免验证)</option>
                             </select>
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">2. 兼职领料口令：</label>
-                            <input type="text" id="settingPasscode" placeholder="如: 8888" 
+                            <label class="block font-semibold text-slate-700 mb-1">2. 每日领料上限 (组)：</label>
+                            <input type="number" id="settingDailyLimit" step="1" min="1" max="100" placeholder="如: 3" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
 
@@ -2125,17 +2117,17 @@ INDEX_HTML = """
 
         window.addEventListener('DOMContentLoaded', () => {
             const savedName = localStorage.getItem('xhs_distributor_name') || '';
-            const savedPasscode = localStorage.getItem('xhs_distributor_passcode') || '8888';
-            if (savedName) document.getElementById('userNameInput').value = savedName;
-            if (savedPasscode) document.getElementById('passcodeInput').value = savedPasscode;
-            if (savedName && savedPasscode) checkUserStatus();
+            const nameEl = document.getElementById('userNameInput');
+            if (nameEl && savedName) nameEl.value = savedName;
+            if (savedName) checkUserStatus();
         });
 
         function saveCredentials() {
-            const name = document.getElementById('userNameInput').value.trim();
-            const passcode = document.getElementById('passcodeInput').value.trim();
-            if (name) localStorage.setItem('xhs_distributor_name', name);
-            if (passcode) localStorage.setItem('xhs_distributor_passcode', passcode);
+            const nameEl = document.getElementById('userNameInput');
+            if (nameEl) {
+                const name = nameEl.value.trim();
+                if (name) localStorage.setItem('xhs_distributor_name', name);
+            }
         }
 
         function showToast(msg) {
@@ -2148,8 +2140,8 @@ INDEX_HTML = """
         }
 
         async function checkUserStatus() {
-            const name = document.getElementById('userNameInput').value.trim();
-            const passcode = document.getElementById('passcodeInput').value.trim();
+            const nameEl = document.getElementById('userNameInput');
+            const name = nameEl ? nameEl.value.trim() : '';
             if (!name) {
                 showToast('请先输入你的姓名或微信昵称');
                 return;
@@ -2157,7 +2149,7 @@ INDEX_HTML = """
             saveCredentials();
 
             try {
-                const res = await fetch(`/api/user/status?name=${encodeURIComponent(name)}&passcode=${encodeURIComponent(passcode)}`);
+                const res = await fetch(`/api/user/status?name=${encodeURIComponent(name)}`);
                 const data = await res.json();
                 if (data.success) {
                     renderUserState(data.user);
@@ -2262,8 +2254,8 @@ INDEX_HTML = """
         }
 
         async function claimMaterial(isNext) {
-            const name = document.getElementById('userNameInput').value.trim();
-            const passcode = document.getElementById('passcodeInput').value.trim();
+            const nameEl = document.getElementById('userNameInput');
+            const name = nameEl ? nameEl.value.trim() : '';
             if (!name) {
                 showToast('请先输入你的姓名或微信昵称！');
                 return;
@@ -2291,7 +2283,6 @@ INDEX_HTML = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         user_name: name,
-                        passcode: passcode,
                         xhs_link: xhsLink
                     })
                 });
@@ -2840,9 +2831,12 @@ INDEX_HTML = """
                 });
                 const data = await res.json();
                 if (data.success) {
-                    document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
-                    document.getElementById('settingPasscode').value = data.passcode || '8888';
-                    document.getElementById('settingTimeoutHours').value = data.claim_timeout_hours || 2;
+                    const authModeEl = document.getElementById('settingAuthMode');
+                    if (authModeEl) authModeEl.value = data.auth_mode || 'whitelist';
+                    const dailyLimitEl = document.getElementById('settingDailyLimit');
+                    if (dailyLimitEl) dailyLimitEl.value = data.daily_limit || 3;
+                    const timeoutEl = document.getElementById('settingTimeoutHours');
+                    if (timeoutEl) timeoutEl.value = data.claim_timeout_hours || 2;
                     if (data.admin_security_question) {
                         currentSecurityQuestion = data.admin_security_question;
                     }
@@ -2851,7 +2845,6 @@ INDEX_HTML = """
                     const serverList = Array.isArray(data.whitelist) ? data.whitelist : [];
                     
                     if (serverList.length === 0 && localCached.length > 0) {
-                        // If server rebooted/emptied, auto-restore local cached whitelist to server
                         currentWhitelist = localCached;
                         saveAdminSettingsSilently();
                     } else {
@@ -2864,9 +2857,12 @@ INDEX_HTML = """
         }
 
         async function saveAdminSettingsSilently() {
-            const auth_mode = document.getElementById('settingAuthMode').value;
-            const passcode = document.getElementById('settingPasscode').value.trim();
-            const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
+            const authModeEl = document.getElementById('settingAuthMode');
+            const auth_mode = authModeEl ? authModeEl.value : 'whitelist';
+            const dailyLimitEl = document.getElementById('settingDailyLimit');
+            const daily_limit = dailyLimitEl ? dailyLimitEl.value.trim() : '3';
+            const timeoutEl = document.getElementById('settingTimeoutHours');
+            const timeout_hours = timeoutEl ? timeoutEl.value.trim() : '2';
 
             try {
                 await fetch('/api/admin/settings', {
@@ -2877,7 +2873,7 @@ INDEX_HTML = """
                     },
                     body: JSON.stringify({
                         auth_mode: auth_mode,
-                        passcode: passcode,
+                        daily_limit: daily_limit,
                         claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })
@@ -2886,9 +2882,12 @@ INDEX_HTML = """
         }
 
         async function saveAdminSettings() {
-            const auth_mode = document.getElementById('settingAuthMode').value;
-            const passcode = document.getElementById('settingPasscode').value.trim();
-            const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
+            const authModeEl = document.getElementById('settingAuthMode');
+            const auth_mode = authModeEl ? authModeEl.value : 'whitelist';
+            const dailyLimitEl = document.getElementById('settingDailyLimit');
+            const daily_limit = dailyLimitEl ? dailyLimitEl.value.trim() : '3';
+            const timeoutEl = document.getElementById('settingTimeoutHours');
+            const timeout_hours = timeoutEl ? timeoutEl.value.trim() : '2';
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -2899,7 +2898,7 @@ INDEX_HTML = """
                     },
                     body: JSON.stringify({
                         auth_mode: auth_mode,
-                        passcode: passcode,
+                        daily_limit: daily_limit,
                         claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })

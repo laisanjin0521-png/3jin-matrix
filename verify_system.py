@@ -156,19 +156,20 @@ def run_all_checks():
     # 4. 兼职领料、图片流与打包下载全链路测试
     # -------------------------------------------------------------
     print("\n【测试 4/9】兼职领料分发、ZIP打包与配图加载闭环自检", flush=True)
-    set_setting('auth_mode', 'passcode')
+    set_setting('auth_mode', 'whitelist')
+    set_setting('whitelist', '["自动化测试员"]')
     client = app.test_client()
     
-    # 领料测试
-    claim_resp = client.post('/api/claim', json={'user_name': '自动化测试员', 'passcode': '8888'})
+    # 领料测试 (仅凭白名单姓名，无需口令)
+    claim_resp = client.post('/api/claim', json={'user_name': '自动化测试员'})
     claim_data = claim_resp.get_json()
     if not claim_data or not claim_data.get('success'):
-        log_fail(f"领料失败: {claim_data}")
+        log_fail(f"白名单免口令领料失败: {claim_data}")
     mat = claim_data['material']
     log_pass(f"成功领取独家素材: 【{mat['group_name']}】 (ID: {mat['id']})")
 
     # 重复领料锁定拦截测试 (必须先完成上一篇)
-    dup_claim = client.post('/api/claim', json={'user_name': '自动化测试员', 'passcode': '8888'}).get_json()
+    dup_claim = client.post('/api/claim', json={'user_name': '自动化测试员'}).get_json()
     if dup_claim.get('success'):
         log_fail("未完成上一篇打卡时，系统允许重复领料（严重漏洞）！")
     log_pass("未打卡前再次领料被系统成功拦截锁定")
