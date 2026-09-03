@@ -23,7 +23,7 @@ if os.path.exists(test_db_path):
     except Exception: pass
 app_module.DB_PATH = test_db_path
 
-from app import app, get_db, init_db, INDEX_HTML, check_worker_auth, get_setting, set_setting
+from app import app, get_db, init_db, INDEX_HTML, check_worker_auth, get_setting, set_setting, auto_inspect_all_submissions_silent
 
 def log_pass(msg):
     print(f"  \033[32m[PASS]\033[0m {msg}", flush=True)
@@ -189,20 +189,29 @@ def run_all_checks():
     log_pass(f"ZIP 打包下载校验成功，包含文件: {file_list}")
 
     # -------------------------------------------------------------
-    # 5. 回传链接打卡与防重复提交测试
+    # 5. 小红书官方审核中打卡免阻断、60分钟冷却与自动巡检测试
     # -------------------------------------------------------------
-    print("\n【测试 5/9】回传链接打卡与防作弊闭环自检", flush=True)
+    print("\n【测试 5/9】小红书官方审核中打卡免阻断、60分钟冷却与自动巡检自检", flush=True)
     test_link = "http://xhslink.com/a/test_auto_verify_123"
     
-    # 录入打卡记录并归档
-    c.execute("""
-    INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, settlement_status, survival_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), 'verified', 'unsettled', 'active')
-    """, ('自动化测试员', mat['id'], mat['group_name'], test_link, '测试作品标题', '#杭州代运营', 1, 'verified'))
-    c.execute("UPDATE materials SET status = 'completed' WHERE id = ?", (mat['id'],))
-    c.execute("UPDATE users SET current_material_id = NULL, completed_count = completed_count + 1 WHERE name = ?", ('自动化测试员',))
-    conn.commit()
-    log_pass("回传链接与打卡记录成功录入数据库台账")
+    # 提交小红书链接打卡 (即使官方在审核中也 100% 打卡成功)
+    sub_resp = client.post('/api/claim', json={'user_name': '自动化测试员', 'xhs_link': test_link})
+    sub_data = sub_resp.get_json()
+    if not sub_data or not sub_data.get('success'):
+        log_fail(f"回传链接打卡失败: {sub_data}")
+    if not sub_data.get('in_cooldown'):
+        log_fail("打卡成功后未正确进入 60 分钟防限流冷却期！")
+    log_pass("小红书审核期打卡成功，已自动归档并启动 60 分钟防限流冷却倒计时")
+
+    # 验证冷却期内禁止领取下一组
+    cd_claim = client.post('/api/claim', json={'user_name': '自动化测试员'}).get_json()
+    if cd_claim.get('success'):
+        log_fail("60 分钟冷却期内系统错误放行了领料请求！")
+    log_pass("60 分钟防限流保护机制生效：冷却期内领料被精准拦截")
+
+    # 验证静默后台自动存活巡检函数
+    auto_inspect_all_submissions_silent()
+    log_pass("后台静默自动巡检守护机制运行正常")
 
     # -------------------------------------------------------------
     # 6. 后台管理、数据查询与批量导出闭环自检

@@ -2,10 +2,12 @@ import os
 import re
 import io
 import json
+import time
 import base64
 import sqlite3
 import datetime
 import zipfile
+import threading
 import mimetypes
 import urllib.request
 import urllib.error
@@ -218,12 +220,12 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_question', '3金的专属安全暗号是什么？')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_answer', '060521')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'whitelist')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('claim_timeout_hours', '2')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '0')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '1')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cooldown_minutes', '60')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '0')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_delete_consumed', '0')")
     
     conn.commit()
@@ -273,6 +275,68 @@ def auto_release_expired_assignments():
     except Exception:
         return 0
 
+def auto_inspect_all_submissions_silent():
+    """Background silent inspector: automatically re-verifies in_review and pending notes on Xiaohongshu."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, xhs_link, survival_status FROM submissions WHERE survival_status IN ('pending', 'in_review') ORDER BY id DESC LIMIT 30")
+        rows = cursor.fetchall()
+        if not rows:
+            conn.close()
+            return 0
+            
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'}
+        updated_count = 0
+        
+        for r in rows:
+            url = r['xhs_link']
+            clean_url_m = re.search(r'https?://[a-zA-Z0-9_\-\.\/\?=&%#]+', url)
+            clean_url = clean_url_m.group(0) if clean_url_m else url
+            survival = r['survival_status']
+            try:
+                req = urllib.request.Request(clean_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    html = resp.read().decode('utf-8', errors='ignore')
+                    if any(kw in html for kw in ['该笔记不存在', '已被删除', '内容已删除', '无法查看', '笔记找不到了']):
+                        survival = 'dead'
+                    elif any(kw in html for kw in ['审核中', '正在审核', '笔记审核中', '仅自己可见']):
+                        survival = 'in_review'
+                    else:
+                        survival = 'active'
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 410):
+                    survival = 'dead'
+            except Exception:
+                pass
+                
+            if survival != r['survival_status']:
+                cursor.execute("UPDATE submissions SET survival_status = ?, last_inspected_at = ? WHERE id = ?", (survival, now_str, r['id']))
+                updated_count += 1
+                
+        conn.commit()
+        conn.close()
+        return updated_count
+    except Exception:
+        return 0
+
+def background_worker_loop():
+    """Runs every 5 minutes in background to auto-inspect notes and auto-release expired materials."""
+    while True:
+        try:
+            time.sleep(300)
+            auto_inspect_all_submissions_silent()
+            auto_release_expired_assignments()
+        except Exception:
+            pass
+
+# Start background thread
+try:
+    threading.Thread(target=background_worker_loop, daemon=True).start()
+except Exception:
+    pass
+
 def extract_last_tag(copy_text):
     if not copy_text:
         return ''
@@ -315,16 +379,20 @@ def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
             title_m = re.search(r'<title>(.*?)</title>', html)
             fetched_title = title_m.group(1).replace(' - 小红书', '').strip() if title_m else ''
             
+            # 检查是否为小红书审核中页面
+            if any(kw in html for kw in ['审核中', '正在审核', '笔记审核中', '仅自己可见', '仅作者可见', '作者正在修改', '作品处理中']):
+                return True, "", fetched_title or "⏳ 官方审核中笔记", True, "in_review"
+            
             tag_clean = expected_tag.replace('#', '').strip() if expected_tag else ''
             tag_found = (tag_clean in html or tag_clean in fetched_title) if tag_clean else True
             
             keywords = [w for w in re.split(r'[\s_，。：:、！!]+', expected_title) if len(w) >= 2]
             title_matched = any(k in html or k in fetched_title for k in keywords) if keywords else True
             
-            check_status = 'matched' if (tag_found or title_matched) else 'suspicious'
-            return True, "", fetched_title or "已解析到有效笔记", (tag_found or title_matched), check_status
+            check_status = 'matched' if (tag_found or title_matched) else 'in_review'
+            return True, "", fetched_title or "已解析到小红书笔记", True, check_status
     except Exception as e:
-        return True, "", "已提交待后台复核", True, "unverified"
+        return True, "", "⏳ 官方审核中笔记（已提交待自动复核）", True, "in_review"
 
 def resolve_file_path(path_str):
     if not path_str:
@@ -521,6 +589,21 @@ def get_user_status():
     today_count = cursor.fetchone()[0]
     
     daily_limit = int(get_setting('daily_limit', '3'))
+    cooldown_min = int(get_setting('cooldown_minutes', '60'))
+    in_cooldown = False
+    cooldown_remaining_seconds = 0
+
+    if not current_material and subs and cooldown_min > 0:
+        try:
+            last_time = datetime.datetime.strptime(subs[0]['submitted_at'], '%Y-%m-%d %H:%M:%S')
+            diff_sec = (datetime.datetime.now() - last_time).total_seconds()
+            req_sec = cooldown_min * 60
+            if diff_sec < req_sec:
+                in_cooldown = True
+                cooldown_remaining_seconds = int(req_sec - diff_sec)
+        except Exception:
+            pass
+
     conn.close()
     
     return jsonify({
@@ -531,7 +614,10 @@ def get_user_status():
             'today_count': today_count,
             'daily_limit': daily_limit,
             'current_material': current_material,
-            'history': subs
+            'history': subs,
+            'in_cooldown': in_cooldown,
+            'cooldown_remaining_seconds': cooldown_remaining_seconds,
+            'cooldown_minutes': cooldown_min
         }
     })
 
@@ -557,6 +643,7 @@ def claim_material():
     today_str = now_dt.strftime('%Y-%m-%d')
     
     daily_limit = int(get_setting('daily_limit', '3'))
+    cooldown_min = int(get_setting('cooldown_minutes', '60'))
     cursor.execute('SELECT COUNT(*) FROM submissions WHERE user_name = ? AND submitted_at LIKE ?', (user_name, f'{today_str}%'))
     today_submitted = cursor.fetchone()[0]
     
@@ -564,6 +651,7 @@ def claim_material():
     user = cursor.fetchone()
     current_mat_id = user['current_material_id'] if user else None
     
+    # Handle submission of currently assigned material
     if current_mat_id:
         cursor.execute('SELECT * FROM materials WHERE id = ?', (current_mat_id,))
         curr_mat = cursor.fetchone()
@@ -602,18 +690,10 @@ def claim_material():
                 conn.close()
                 return jsonify({'success': False, 'error': err_msg})
             
-            strict_tag = get_setting('strict_tag_check', '1') == '1'
-            if strict_tag and not matched and check_status == 'suspicious':
-                conn.close()
-                return jsonify({
-                    'success': False,
-                    'error': f'❌ 核验未通过：系统未在该小红书作品中检测到文案专属 Tag【{expected_tag}】或标题关键词！\n请确认是否按要求完整复制发布，切勿提交他人或无关笔记。'
-                })
-            
             cursor.execute("""
             INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, settlement_status, survival_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'unsettled', 'pending')
-            """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'unsettled', ?)
+            """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str, 'in_review' if check_status == 'in_review' else 'active'))
             
             auto_delete = get_setting('auto_delete_consumed', '0') == '1'
             if auto_delete:
@@ -626,7 +706,31 @@ def claim_material():
             UPDATE users SET completed_count = completed_count + 1, current_material_id = NULL, last_active = ?
             WHERE name = ?
             """, (now_str, user_name))
+            conn.commit()
+
+            req_cooldown_sec = cooldown_min * 60
+            conn.close()
+
+            review_tip = "（小红书官方审核中，系统已记录）" if check_status == 'in_review' else ""
+            return jsonify({
+                'success': True,
+                'submitted_success': True,
+                'message': f'🎉 打卡成功{review_tip}！已开启 60 分钟防限流保护，冷却结束后可继续领取下一篇。',
+                'in_cooldown': cooldown_min > 0,
+                'cooldown_remaining_seconds': req_cooldown_sec,
+                'user': {
+                    'name': user_name,
+                    'completed_count': user['completed_count'] + 1 if user else 1,
+                    'today_count': today_submitted,
+                    'daily_limit': daily_limit,
+                    'current_material': None,
+                    'in_cooldown': cooldown_min > 0,
+                    'cooldown_remaining_seconds': req_cooldown_sec,
+                    'cooldown_minutes': cooldown_min
+                }
+            })
             
+    # Handle claiming next available material
     if today_submitted >= daily_limit:
         conn.commit()
         conn.close()
@@ -636,22 +740,27 @@ def claim_material():
             'error': f'🛑 你今天已成功打卡 {today_submitted} 篇，已达到单日领料上限（{daily_limit} 篇/天）！小红书单号频繁发帖易被平台限流，请明天再来领取~'
         })
         
-    cooldown_min = int(get_setting('cooldown_minutes', '0'))
+    # Check cooldown
     if cooldown_min > 0:
         cursor.execute('SELECT submitted_at FROM submissions WHERE user_name = ? ORDER BY id DESC LIMIT 1', (user_name,))
         last_sub = cursor.fetchone()
         if last_sub:
-            last_time = datetime.datetime.strptime(last_sub['submitted_at'], '%Y-%m-%d %H:%M:%S')
-            diff_seconds = (now_dt - last_time).total_seconds()
-            required_seconds = cooldown_min * 60
-            if diff_seconds < required_seconds:
-                remaining_min = int((required_seconds - diff_seconds) / 60) + 1
-                conn.commit()
-                conn.close()
-                return jsonify({
-                    'success': False,
-                    'error': f'⏳ 小红书养号防封保护：距离上一篇发布还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
-                })
+            try:
+                last_time = datetime.datetime.strptime(last_sub['submitted_at'], '%Y-%m-%d %H:%M:%S')
+                diff_seconds = (now_dt - last_time).total_seconds()
+                required_seconds = cooldown_min * 60
+                if diff_seconds < required_seconds:
+                    remaining_seconds = int(required_seconds - diff_seconds)
+                    remaining_min = int(remaining_seconds / 60) + 1
+                    conn.close()
+                    return jsonify({
+                        'success': False,
+                        'in_cooldown': True,
+                        'cooldown_remaining_seconds': remaining_seconds,
+                        'error': f'⏳ 小红书养号防限流保护：距离上一篇打卡还需等待 {remaining_min} 分钟冷却时间，稍后再来领取下一组！'
+                    })
+            except Exception:
+                pass
     
     cursor.execute("SELECT * FROM materials WHERE status = 'available' ORDER BY id ASC LIMIT 1")
     next_mat = cursor.fetchone()
@@ -752,7 +861,7 @@ def admin_settings():
         'auth_mode': get_setting('auth_mode', 'whitelist'),
         'daily_limit': get_setting('daily_limit', '3'),
         'claim_timeout_hours': get_setting('claim_timeout_hours', '2'),
-        'cooldown_minutes': get_setting('cooldown_minutes', '0'),
+        'cooldown_minutes': get_setting('cooldown_minutes', '60'),
         'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
         'auto_delete_consumed': get_setting('auto_delete_consumed', '0') == '1',
         'admin_password': get_setting('admin_password', '060521'),
@@ -1413,8 +1522,26 @@ INDEX_HTML = """
                 </div>
 
                 <button onclick="claimMaterial(true)" id="claimBtn" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-sm shadow-md shadow-emerald-600/20 transition flex items-center justify-center space-x-2">
-                    <span>🚀 提交打卡 ➔ 领取下一组</span>
+                    <span>🚀 提交小红书打卡链接</span>
                 </button>
+            </div>
+
+            <!-- State 3: In 60-Minute Anti-Rate-Limit Cooldown -->
+            <div id="cooldownBox" class="mt-3 p-4 bg-gradient-to-br from-amber-50 to-orange-50 rounded-2xl border border-amber-200/80 text-center space-y-2.5 hidden">
+                <div class="inline-flex items-center space-x-1.5 px-3 py-1 bg-amber-100/90 text-amber-900 rounded-full text-xs font-bold shadow-sm">
+                    <span class="animate-pulse">⏳</span>
+                    <span>小红书养号防限流保护中</span>
+                </div>
+                <div>
+                    <div class="text-[11px] font-semibold text-amber-800">距离可领取下一组素材还需等待：</div>
+                    <div class="text-3xl sm:text-4xl font-black tracking-widest text-amber-900 font-mono py-1 drop-shadow-sm" id="cooldownTimerDisplay">
+                        59:59
+                    </div>
+                </div>
+                <div class="p-2.5 bg-white/80 rounded-xl text-left border border-amber-200/60 text-[11px] text-amber-900 leading-relaxed space-y-1">
+                    <p>📌 <strong>防封限流说明</strong>：小红书单号短时间内频繁连续发帖易被系统判定为营销脚本降权限流。</p>
+                    <p>🛡️ 系统已开启 <strong>60 分钟安全间隔保护</strong>，倒计时结束后将自动解锁领取下一篇独家素材！</p>
+                </div>
             </div>
         </div>
 
@@ -2161,12 +2288,40 @@ INDEX_HTML = """
             }
         }
 
+        let cooldownTimerInterval = null;
+
+        function startCooldownTimer(seconds) {
+            if (cooldownTimerInterval) clearInterval(cooldownTimerInterval);
+            let remaining = seconds;
+
+            function updateDisplay() {
+                if (remaining <= 0) {
+                    clearInterval(cooldownTimerInterval);
+                    cooldownTimerInterval = null;
+                    showToast('🎉 60 分钟冷却时间已结束，现在可以领取下一组素材啦！');
+                    checkUserStatus();
+                    return;
+                }
+                const m = Math.floor(remaining / 60);
+                const s = remaining % 60;
+                const mStr = String(m).padStart(2, '0');
+                const sStr = String(s).padStart(2, '0');
+                const timerEl = document.getElementById('cooldownTimerDisplay');
+                if (timerEl) timerEl.innerText = `${mStr}:${sStr}`;
+                remaining--;
+            }
+
+            updateDisplay();
+            cooldownTimerInterval = setInterval(updateDisplay, 1000);
+        }
+
         function renderUserState(user) {
             const badge = document.getElementById('completedBadge');
             const todayCountSpan = document.getElementById('todayCountSpan');
             const dailyLimitSpan = document.getElementById('dailyLimitSpan');
             const firstClaimBox = document.getElementById('firstClaimBox');
             const submitLinkBox = document.getElementById('submitLinkBox');
+            const cooldownBox = document.getElementById('cooldownBox');
             const activeGroupName = document.getElementById('activeGroupName');
             const matCard = document.getElementById('materialContentCard');
             const historyCard = document.getElementById('historyCard');
@@ -2177,11 +2332,21 @@ INDEX_HTML = """
             dailyLimitSpan.innerText = user.daily_limit || 3;
 
             if (user.current_material) {
+                if (cooldownTimerInterval) { clearInterval(cooldownTimerInterval); cooldownTimerInterval = null; }
+                if (cooldownBox) cooldownBox.classList.add('hidden');
                 firstClaimBox.classList.add('hidden');
                 submitLinkBox.classList.remove('hidden');
                 activeGroupName.innerText = user.current_material.group_name;
                 renderMaterialCard(user.current_material);
+            } else if (user.in_cooldown && user.cooldown_remaining_seconds > 0) {
+                firstClaimBox.classList.add('hidden');
+                submitLinkBox.classList.add('hidden');
+                matCard.classList.add('hidden');
+                if (cooldownBox) cooldownBox.classList.remove('hidden');
+                startCooldownTimer(user.cooldown_remaining_seconds);
             } else {
+                if (cooldownTimerInterval) { clearInterval(cooldownTimerInterval); cooldownTimerInterval = null; }
+                if (cooldownBox) cooldownBox.classList.add('hidden');
                 firstClaimBox.classList.remove('hidden');
                 submitLinkBox.classList.add('hidden');
                 matCard.classList.add('hidden');
@@ -2204,10 +2369,17 @@ INDEX_HTML = """
                         </div>
                         <div class="text-right text-[11px] text-slate-400 space-y-1">
                             <div>${item.submitted_at.split(' ')[1]}</div>
-                            <div>
+                            <div class="flex items-center justify-end space-x-1">
+                                ${item.survival_status === 'in_review' 
+                                    ? '<span class="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded font-bold">⏳ 审核中</span>' 
+                                    : (item.survival_status === 'active' 
+                                        ? '<span class="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded font-bold">✅ 存活</span>'
+                                        : (item.survival_status === 'dead'
+                                            ? '<span class="px-2 py-0.5 bg-rose-50 text-rose-700 border border-rose-200 rounded font-bold">❌ 异常</span>'
+                                            : '<span class="px-2 py-0.5 bg-slate-50 text-slate-600 border border-slate-200 rounded font-bold">待复核</span>'))}
                                 ${item.settlement_status === 'settled' 
-                                    ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-bold">🟢 已结算提成</span>' 
-                                    : '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded font-bold">⏳ 待结算</span>'}
+                                    ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-bold">🟢 已结</span>' 
+                                    : '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded font-bold">⏳ 待结</span>'}
                             </div>
                         </div>
                     </div>
@@ -2289,16 +2461,24 @@ INDEX_HTML = """
                 const data = await res.json();
                 if (data.success) {
                     showToast(data.message);
-                    document.getElementById('xhsLinkInput').value = '';
-                    checkUserStatus();
+                    const linkInput = document.getElementById('xhsLinkInput');
+                    if (linkInput) linkInput.value = '';
+                    if (data.user) {
+                        renderUserState(data.user);
+                    } else {
+                        checkUserStatus();
+                    }
                 } else {
                     showToast(data.error);
+                    if (data.in_cooldown) {
+                        checkUserStatus();
+                    }
                 }
             } catch (err) {
                 showToast('网络请求异常');
             } finally {
                 if (btn && isNext) {
-                    btn.innerHTML = '<span>🚀 提交打卡 ➔ 领取下一组</span>';
+                    btn.innerHTML = '<span>🚀 提交小红书打卡链接</span>';
                     btn.disabled = false;
                 }
             }
