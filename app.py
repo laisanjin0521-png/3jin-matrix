@@ -1570,32 +1570,83 @@ INDEX_HTML = """
                     </div>
                 </div>
 
-                <!-- Recent Submissions Table & Settlement Ledger -->
-                <div>
-                    <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider flex items-center space-x-1.5">
-                            <span>📋</span>
-                            <span>实时打卡审核与结算台账：</span>
+                <!-- Data Query & Submissions Table & Settlement Ledger -->
+                <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <h3 class="font-bold text-xs text-slate-900 uppercase tracking-wider flex items-center space-x-1.5">
+                            <span>🔍</span>
+                            <span>兼职回传数据精准查询与结算台账</span>
                         </h3>
                         <div class="flex items-center space-x-2">
-                            <button onclick="inspectSurvivalStatus()" id="inspectBtn" class="text-[11px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1">
+                            <button onclick="inspectSurvivalStatus()" id="inspectBtn" class="text-[11px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
                                 <span>🔍 24h存活巡检</span>
                             </button>
-                            <a href="/api/admin/export_csv" class="text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1">
+                            <a href="/api/admin/export_csv" class="text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
                                 <span>📥 导出 Excel 账单</span>
                             </a>
                         </div>
                     </div>
-                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
+
+                    <!-- Multi-dimensional Filter Bar -->
+                    <div class="p-3 bg-white rounded-xl border border-slate-200 space-y-2.5 text-xs shadow-sm">
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <!-- Worker Name Filter -->
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-600 mb-1">👤 按兼职/白名单姓名筛选：</label>
+                                <select id="filterWorkerSelect" onchange="applySubmissionsFilter()" class="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <option value="">-- 全部兼职 (不限) --</option>
+                                </select>
+                            </div>
+
+                            <!-- Date Filter -->
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-600 mb-1">📅 按打卡日期筛选：</label>
+                                <input type="date" id="filterDateInput" onchange="applySubmissionsFilter()" class="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            </div>
+
+                            <!-- Settlement Filter -->
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-600 mb-1">💰 结算状态筛选：</label>
+                                <select id="filterSettleSelect" onchange="applySubmissionsFilter()" class="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <option value="">-- 全部状态 --</option>
+                                    <option value="unsettled">🟡 待结算</option>
+                                    <option value="settled">🟢 已结算</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Quick Filter Tags & Actions -->
+                        <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-100 text-[11px]">
+                            <div class="flex items-center gap-1.5 flex-wrap">
+                                <span class="text-slate-400 font-medium">快捷日期:</span>
+                                <button onclick="setFilterDatePreset('all')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">全部</button>
+                                <button onclick="setFilterDatePreset('today')" class="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold transition">今天</button>
+                                <button onclick="setFilterDatePreset('yesterday')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">昨天</button>
+                                <button onclick="setFilterDatePreset('7days')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">近7天</button>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span id="filterResultCountBadge" class="text-blue-700 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-100">共 0 条打卡</span>
+                                <button onclick="copyFilteredLinks()" title="一键复制当前查出的所有小红书回传链接" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg font-bold transition flex items-center space-x-1 shadow-sm">
+                                    <span>📋 批量复制回传链接</span>
+                                </button>
+                                <button onclick="resetSubmissionsFilter()" class="px-2 py-1 text-slate-500 hover:text-slate-700 font-bold transition">
+                                    🔄 重置筛选
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Submissions Table -->
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto bg-white shadow-sm">
                         <table class="w-full text-xs text-left border-collapse">
-                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
+                            <thead class="bg-slate-100 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-10 shadow-sm">
                                 <tr>
-                                    <th class="p-2">打卡时间</th>
-                                    <th class="p-2">人员</th>
-                                    <th class="p-2">作品组名</th>
-                                    <th class="p-2">小红书链接</th>
-                                    <th class="p-2">24h存活</th>
-                                    <th class="p-2 text-center">结算状态 (点击切换)</th>
+                                    <th class="p-2.5">打卡时间</th>
+                                    <th class="p-2.5">兼职人员</th>
+                                    <th class="p-2.5">作品组名</th>
+                                    <th class="p-2.5">回传小红书链接</th>
+                                    <th class="p-2.5">Tag核验 / 存活</th>
+                                    <th class="p-2.5 text-center">结算操作</th>
                                 </tr>
                             </thead>
                             <tbody id="adminSubmissionsBody" class="divide-y divide-slate-100">
@@ -1623,6 +1674,8 @@ INDEX_HTML = """
         let currentMaterialData = null;
         let adminAuthToken = localStorage.getItem('xhs_admin_pwd') || '';
         let currentWhitelist = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
+        let allAdminSubmissions = [];
+        let currentlyFilteredSubmissions = [];
 
         window.addEventListener('DOMContentLoaded', () => {
             const savedName = localStorage.getItem('xhs_distributor_name') || '';
@@ -2384,36 +2437,9 @@ INDEX_HTML = """
                         matBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无素材，请在上方添加新素材</td></tr>';
                     }
 
-                    const subBody = document.getElementById('adminSubmissionsBody');
-                    if (data.submissions.length > 0) {
-                        subBody.innerHTML = data.submissions.map(s => {
-                            const isSettled = s.settlement_status === 'settled';
-                            const survStatus = s.survival_status === 'active' ? '<span class="text-emerald-600 font-bold">🟢 正常存活</span>' :
-                                               s.survival_status === 'dead' ? '<span class="text-red-600 font-bold">🔴 已被删/私密</span>' :
-                                               '<span class="text-slate-400">待巡检</span>';
-                            return `
-                                <tr class="hover:bg-slate-50">
-                                    <td class="p-2 text-slate-500 whitespace-nowrap">${s.submitted_at ? s.submitted_at.split(' ')[0].substring(5) + ' ' + s.submitted_at.split(' ')[1].substring(0,5) : '-'}</td>
-                                    <td class="p-2 font-bold text-slate-800">${s.user_name}</td>
-                                    <td class="p-2 text-slate-700 truncate max-w-[110px]" title="${s.material_name}">${s.material_name}</td>
-                                    <td class="p-2">
-                                        <a href="${s.xhs_link}" target="_blank" class="text-red-600 font-semibold hover:underline flex items-center space-x-1 truncate max-w-[110px]">
-                                            <span>🔗 打开笔记</span>
-                                        </a>
-                                    </td>
-                                    <td class="p-2 text-[11px] whitespace-nowrap">${survStatus}</td>
-                                    <td class="p-2 text-center whitespace-nowrap">
-                                        <button onclick="toggleSettlement(${s.id}, '${s.settlement_status || 'unsettled'}')" 
-                                            class="px-2.5 py-1 rounded-full text-[11px] font-bold transition shadow-sm ${isSettled ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300' : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300'}">
-                                            <span>${isSettled ? '🟢 已结算' : '🟡 待结算'}</span>
-                                        </button>
-                                    </td>
-                                </tr>
-                            `;
-                        }).join('');
-                    } else {
-                        subBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无打卡记录</td></tr>';
-                    }
+                    allAdminSubmissions = data.submissions || [];
+                    updateFilterWorkerDropdown(data.workers || []);
+                    applySubmissionsFilter();
                 } else if (data.error) {
                     adminAuthToken = '';
                     localStorage.removeItem('xhs_admin_pwd');
@@ -2422,6 +2448,173 @@ INDEX_HTML = """
             } catch (err) {
                 showToast('加载管理后台失败');
             }
+        }
+
+        function updateFilterWorkerDropdown(workers) {
+            const select = document.getElementById('filterWorkerSelect');
+            if (!select) return;
+            const currentVal = select.value;
+            
+            const nameSet = new Set();
+            currentWhitelist.forEach(n => { if (n) nameSet.add(n); });
+            allAdminSubmissions.forEach(s => { if (s.user_name) nameSet.add(s.user_name); });
+            workers.forEach(w => { if (w.name) nameSet.add(w.name); });
+            
+            const sortedNames = Array.from(nameSet).sort();
+            select.innerHTML = '<option value="">-- 全部兼职 (不限) --</option>' + 
+                sortedNames.map(n => `<option value="${n}">${n}</option>`).join('');
+                
+            if (sortedNames.includes(currentVal)) {
+                select.value = currentVal;
+            }
+        }
+
+        function setFilterDatePreset(preset) {
+            const dateInput = document.getElementById('filterDateInput');
+            const now = new Date();
+            const formatDate = (d) => {
+                const year = d.getFullYear();
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+            
+            if (preset === 'all') {
+                dateInput.value = '';
+                dateInput.dataset.preset = '';
+            } else if (preset === 'today') {
+                dateInput.value = formatDate(now);
+                dateInput.dataset.preset = '';
+            } else if (preset === 'yesterday') {
+                const yest = new Date(now);
+                yest.setDate(yest.getDate() - 1);
+                dateInput.value = formatDate(yest);
+                dateInput.dataset.preset = '';
+            } else if (preset === '7days') {
+                dateInput.value = '';
+                dateInput.dataset.preset = '7days';
+            }
+            applySubmissionsFilter();
+        }
+
+        function resetSubmissionsFilter() {
+            const wSelect = document.getElementById('filterWorkerSelect');
+            const dInput = document.getElementById('filterDateInput');
+            const sSelect = document.getElementById('filterSettleSelect');
+            if (wSelect) wSelect.value = '';
+            if (dInput) { dInput.value = ''; dInput.dataset.preset = ''; }
+            if (sSelect) sSelect.value = '';
+            applySubmissionsFilter();
+            showToast('已重置所有筛选条件');
+        }
+
+        function applySubmissionsFilter() {
+            const worker = document.getElementById('filterWorkerSelect')?.value || '';
+            const dateInput = document.getElementById('filterDateInput');
+            const dateVal = dateInput?.value || '';
+            const presetVal = dateInput?.dataset?.preset || '';
+            const settle = document.getElementById('filterSettleSelect')?.value || '';
+            const subBody = document.getElementById('adminSubmissionsBody');
+            const countBadge = document.getElementById('filterResultCountBadge');
+            
+            const now = new Date();
+            const sevenDaysAgo = new Date(now);
+            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+            const year = sevenDaysAgo.getFullYear();
+            const month = String(sevenDaysAgo.getMonth() + 1).padStart(2, '0');
+            const day = String(sevenDaysAgo.getDate()).padStart(2, '0');
+            const sevenDaysAgoStr = `${year}-${month}-${day}`;
+
+            currentlyFilteredSubmissions = allAdminSubmissions.filter(s => {
+                if (worker && s.user_name !== worker) return false;
+                if (settle && (s.settlement_status || 'unsettled') !== settle) return false;
+                
+                const subDate = s.submitted_at ? s.submitted_at.split(' ')[0] : '';
+                if (presetVal === '7days') {
+                    if (subDate < sevenDaysAgoStr) return false;
+                } else if (dateVal && subDate !== dateVal) {
+                    return false;
+                }
+                return true;
+            });
+
+            const total = currentlyFilteredSubmissions.length;
+            const settledCount = currentlyFilteredSubmissions.filter(s => s.settlement_status === 'settled').length;
+            const unsettledCount = total - settledCount;
+            if (countBadge) {
+                countBadge.innerText = `共 ${total} 条 (待结 ${unsettledCount} / 已结 ${settledCount})`;
+            }
+
+            if (!subBody) return;
+
+            if (currentlyFilteredSubmissions.length > 0) {
+                subBody.innerHTML = currentlyFilteredSubmissions.map(s => {
+                    const isSettled = s.settlement_status === 'settled';
+                    const survStatus = s.survival_status === 'active' ? '<span class="text-emerald-600 font-bold">🟢 正常存活</span>' :
+                                       s.survival_status === 'dead' ? '<span class="text-red-600 font-bold">🔴 已被删/失效</span>' :
+                                       '<span class="text-slate-400">待巡检</span>';
+                    const tagInfo = s.tag_matched === 1 ? `<span class="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="${s.tag_expected || ''}">✅ 已核Tag</span>` :
+                                                          `<span class="text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200" title="${s.tag_expected || ''}">⚠️ Tag待查</span>`;
+                    return `
+                        <tr class="hover:bg-blue-50/50 transition">
+                            <td class="p-2.5 text-slate-500 whitespace-nowrap font-mono text-[11px]">${s.submitted_at ? s.submitted_at.substring(5, 16) : '-'}</td>
+                            <td class="p-2.5 font-bold text-slate-900 whitespace-nowrap">
+                                <span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 border border-slate-200">${s.user_name}</span>
+                            </td>
+                            <td class="p-2.5 text-slate-700 truncate max-w-[130px]" title="${s.material_name}">${s.material_name}</td>
+                            <td class="p-2.5">
+                                <div class="flex items-center space-x-1.5">
+                                    <a href="${s.xhs_link}" target="_blank" class="text-red-600 font-bold hover:underline flex items-center space-x-0.5 truncate max-w-[100px]" title="${s.xhs_link}">
+                                        <span>🔗 打开笔记</span>
+                                    </a>
+                                    <button onclick="copySingleLink('${s.xhs_link}')" title="一键复制链接" class="text-[10px] text-slate-600 hover:text-blue-600 bg-slate-100 hover:bg-slate-200 px-1.5 py-0.5 rounded font-medium transition shadow-xs">
+                                        复制
+                                    </button>
+                                </div>
+                            </td>
+                            <td class="p-2.5 text-[11px] whitespace-nowrap">
+                                <div class="flex items-center space-x-1.5">
+                                    <span>${tagInfo}</span>
+                                    <span>${survStatus}</span>
+                                </div>
+                            </td>
+                            <td class="p-2.5 text-center whitespace-nowrap">
+                                <button onclick="toggleSettlement(${s.id}, '${s.settlement_status || 'unsettled'}')" 
+                                    class="px-2.5 py-1 rounded-full text-[11px] font-bold transition shadow-sm ${isSettled ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300' : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300'}">
+                                    <span>${isSettled ? '🟢 已结算' : '🟡 待结算'}</span>
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                subBody.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-slate-400 font-medium">没有查到符合条件的打卡记录，请尝试调整筛选条件</td></tr>';
+            }
+        }
+
+        function copySingleLink(link) {
+            if (!link) return;
+            navigator.clipboard.writeText(link).then(() => {
+                showToast('已复制小红书链接到剪贴板！');
+            }).catch(() => {
+                showToast('复制失败，请手动长按复制');
+            });
+        }
+
+        function copyFilteredLinks() {
+            if (!currentlyFilteredSubmissions || currentlyFilteredSubmissions.length === 0) {
+                showToast('当前没有查询到任何回传记录！');
+                return;
+            }
+            const linkList = currentlyFilteredSubmissions.map((s, idx) => 
+                `${idx + 1}. 【${s.user_name}】 ${s.material_name} (${s.submitted_at}):\n${s.xhs_link}`
+            ).join('\n\n');
+            
+            navigator.clipboard.writeText(linkList).then(() => {
+                showToast(`🎉 成功批量复制 ${currentlyFilteredSubmissions.length} 条回传链接！`);
+            }).catch(() => {
+                showToast('复制失败，请重试');
+            });
         }
     </script>
 </body>
