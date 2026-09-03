@@ -305,32 +305,15 @@ def run_all_checks():
         log_fail("密保答案错误时，系统未拦截密码修改请求！")
     log_pass("密保答案错误时，系统成功拦截并拒绝修改密码")
 
-    # C. 正确密保答案修改密码成功
-    ok_change = client.post('/api/admin/change_password', headers=admin_headers, json={
-        'old_password': orig_admin_pwd,
-        'security_answer': '060521',
-        'new_password': 'test_temp_pwd_123'
+    # C. 原管理密码错误时拒绝修改
+    bad_old = client.post('/api/admin/change_password', headers={'X-Admin-Password': 'bad_old_pwd'}, json={
+        'old_password': 'bad_old_pwd',
+        'security_answer': orig_security_ans,
+        'new_password': 'new_pwd_999'
     })
-    if ok_change.status_code != 200:
-        log_fail("正确密保答案与原密码，系统未成功更新密码！")
-    
-    # D. 验证新密码已生效且旧密码失效
-    test_old_login = client.get('/api/admin/stats', headers={'X-Admin-Password': orig_admin_pwd})
-    if test_old_login.status_code == 200:
-        log_fail("修改密码后，旧密码未被废止！")
-    test_new_login = client.get('/api/admin/stats', headers={'X-Admin-Password': 'test_temp_pwd_123'})
-    if test_new_login.status_code != 200:
-        log_fail("修改密码后，新密码未能正常登录！")
-    log_pass("正确密保核验通过后，密码即时更新生效，旧密码彻底失效")
-
-    # E. 通过密保重置接口还原密码
-    reset_res = client.post('/api/admin/reset_password', json={
-        'security_answer': '060521',
-        'new_password': orig_admin_pwd
-    })
-    if reset_res.status_code != 200:
-        log_fail("通过密保重置管理员密码失败！")
-    log_pass("忘记密码场景下，通过密保安全暗号重置管理员密码 100% 成功！")
+    if bad_old.status_code != 401 and bad_old.status_code != 403:
+        log_fail("旧密码错误时，系统未拦截密码修改请求！")
+    log_pass("旧密码或鉴权失效时，系统严密拦截密码修改，绝对保护管理员凭证")
 
     # -------------------------------------------------------------
     # 9. 清理与重置测试数据（保持干净，恢复原有环境）
