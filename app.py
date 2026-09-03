@@ -11,6 +11,9 @@ import threading
 import mimetypes
 import urllib.request
 import urllib.error
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from flask import Flask, request, jsonify, send_file, render_template_string, Response, make_response
 
 app = Flask(__name__)
@@ -48,6 +51,13 @@ TURSO_AUTH_TOKEN = os.environ.get(
     "TURSO_AUTH_TOKEN",
     "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgzODE2NzgsImlkIjoiMDFhMDYzZDktYjgwMS03MzZhLWFiYzYtYzZlYTA4OGU3Mjc4Iiwia2lkIjoiV2lzLXRta2xiQ1BZX0YwcXBEYTVDbzA5ZTJUWXhUSkFrWUl5b2NaYWdqdyIsInJpZCI6IjQ2NWRkNGYzLWIzNTUtNGNiOS05Yjk5LTIzMzhhYjgzMmMwOCJ9.Clkqlm5HEMhyLNS3r6ygb4KSoeM1VZEZPFzp5Gd-YWjh9GOftx2zDjDL9ZqZFSZM43XTUTTIVL0CGIFmtZZkAQ"
 )
+
+# High-Performance HTTP Session with Connection Pooling & Keep-Alive for Tokyo Turso Cloud DB
+turso_session = requests.Session()
+retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[502, 503, 504])
+adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retries)
+turso_session.mount("https://", adapter)
+turso_session.mount("http://", adapter)
 
 class TursoRow(dict):
     def __init__(self, cols, values):
@@ -99,15 +109,24 @@ class TursoCursor:
             ]
         }
         
-        req = urllib.request.Request(
-            TURSO_DATABASE_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
-            method="POST"
-        )
-        
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            resp = turso_session.post(
+                TURSO_DATABASE_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+                timeout=10
+            )
+            data = resp.json()
+        except Exception:
+            # Fallback to urllib if session encounters network hiccup
+            req = urllib.request.Request(
+                TURSO_DATABASE_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=12) as url_resp:
+                data = json.loads(url_resp.read().decode("utf-8"))
             
         res = data["results"][0]
         if res["type"] == "error":
@@ -252,20 +271,39 @@ def init_db():
     conn.commit()
     conn.close()
 
+_SETTINGS_CACHE = {}
+_SETTINGS_CACHE_TIME = 0
+
+def get_all_settings_dict():
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_TIME
+    now = time.time()
+    if _SETTINGS_CACHE and (now - _SETTINGS_CACHE_TIME < 20):
+        return _SETTINGS_CACHE
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM settings")
+        rows = c.fetchall()
+        conn.close()
+        _SETTINGS_CACHE = {r['key']: r['value'] for r in rows}
+        _SETTINGS_CACHE_TIME = now
+        return _SETTINGS_CACHE
+    except Exception:
+        return _SETTINGS_CACHE or {}
+
 def get_setting(key, default=None):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row['value'] if row else default
+    settings = get_all_settings_dict()
+    return settings.get(key, default)
 
 def set_setting(key, value):
+    global _SETTINGS_CACHE
     conn = get_db()
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+    if isinstance(_SETTINGS_CACHE, dict):
+        _SETTINGS_CACHE[key] = str(value)
 
 def auto_release_expired_assignments():
     try:
@@ -833,6 +871,14 @@ def claim_material():
             'last_tag': last_tag,
             'assigned_at': now_str
         }
+    })
+
+@app.route('/api/ping', methods=['GET'])
+def api_ping():
+    return jsonify({
+        'success': True,
+        'status': 'pong',
+        'beijing_time': get_beijing_now_str()
     })
 
 @app.route('/api/admin/login', methods=['POST'])
