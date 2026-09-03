@@ -978,6 +978,158 @@ def admin_batch_add():
     conn.close()
     return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品！'})
 
+def get_pipeline_queues():
+    try:
+        covers = json.loads(get_setting('buffer_covers', '[]'))
+    except Exception:
+        covers = []
+    try:
+        contents = json.loads(get_setting('buffer_contents', '[]'))
+    except Exception:
+        contents = []
+    try:
+        ends = json.loads(get_setting('buffer_ends', '[]'))
+    except Exception:
+        ends = []
+    try:
+        copies = json.loads(get_setting('buffer_copies', '[]'))
+    except Exception:
+        copies = []
+    return covers, contents, ends, copies
+
+def save_pipeline_queues(covers, contents, ends, copies):
+    set_setting('buffer_covers', json.dumps(covers, ensure_ascii=False))
+    set_setting('buffer_contents', json.dumps(contents, ensure_ascii=False))
+    set_setting('buffer_ends', json.dumps(ends, ensure_ascii=False))
+    set_setting('buffer_copies', json.dumps(copies, ensure_ascii=False))
+
+def trigger_pipeline_auto_assembly(prefix='装配作品_'):
+    covers, contents, ends, copies = get_pipeline_queues()
+    assemble_count = min(len(covers), len(contents), len(ends), len(copies))
+    if assemble_count <= 0:
+        return 0, {
+            'covers': len(covers),
+            'contents': len(contents),
+            'ends': len(ends),
+            'copies': len(copies),
+            'can_assemble': False
+        }
+
+    conn = get_db()
+    cursor = conn.cursor()
+    now_dt = datetime.datetime.now()
+    time_tag = now_dt.strftime('%m%d_%H%M%S')
+
+    for i in range(assemble_count):
+        cover = covers.pop(0)
+        content = contents.pop(0)
+        end = ends.pop(0)
+        copy_text = copies.pop(0)
+
+        group_name = f"{prefix}{time_tag}_{i+1:02d}"
+        first_line = copy_text.split('\n')[0].strip() if copy_text else ''
+        title = first_line[:30] if first_line else group_name
+        last_tag = extract_last_tag(copy_text)
+        images_json = json.dumps([cover, content, end], ensure_ascii=False)
+        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        cursor.execute("""
+        INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+        VALUES (?, ?, 'pipeline_assembled', ?, ?, ?, 'available', ?)
+        """, (group_name, title, images_json, copy_text, last_tag, now_str))
+
+    conn.commit()
+    conn.close()
+
+    save_pipeline_queues(covers, contents, ends, copies)
+    return assemble_count, {
+        'covers': len(covers),
+        'contents': len(contents),
+        'ends': len(ends),
+        'copies': len(copies),
+        'can_assemble': False
+    }
+
+@app.route('/api/admin/pipeline/status', methods=['GET'])
+def admin_pipeline_status():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+    
+    covers, contents, ends, copies = get_pipeline_queues()
+    min_count = min(len(covers), len(contents), len(ends), len(copies))
+    return jsonify({
+        'success': True,
+        'counts': {
+            'covers': len(covers),
+            'contents': len(contents),
+            'ends': len(ends),
+            'copies': len(copies)
+        },
+        'can_assemble': min_count >= 1,
+        'min_count': min_count
+    })
+
+@app.route('/api/admin/pipeline/push', methods=['POST'])
+def admin_pipeline_push():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+
+    data = request.json or {}
+    slot = data.get('slot', '')
+    items = data.get('items', [])
+    prefix = data.get('prefix', '装配作品_').strip()
+
+    if not slot or not items:
+        return jsonify({'success': False, 'error': '缺少入池数据！'}), 400
+
+    covers, contents, ends, copies = get_pipeline_queues()
+    if slot == 'covers':
+        covers.extend(items)
+    elif slot == 'contents':
+        contents.extend(items)
+    elif slot == 'ends':
+        ends.extend(items)
+    elif slot == 'copies':
+        copies.extend(items)
+    else:
+        return jsonify({'success': False, 'error': '无效的槽位名称'}), 400
+
+    save_pipeline_queues(covers, contents, ends, copies)
+    assembled, status = trigger_pipeline_auto_assembly(prefix)
+    
+    return jsonify({
+        'success': True,
+        'assembled': assembled,
+        'counts': {
+            'covers': len(covers),
+            'contents': len(contents),
+            'ends': len(ends),
+            'copies': len(copies)
+        },
+        'message': f'🎉 成功入池 {len(items)} 项！' + (f' ⚡️ 满足 3 图+文案条件，已自动拼装并入库 {assembled} 组新作品！' if assembled > 0 else '')
+    })
+
+@app.route('/api/admin/pipeline/clear', methods=['POST'])
+def admin_pipeline_clear():
+    admin_pwd = request.headers.get('X-Admin-Password', '')
+    real_pwd = get_setting('admin_password', '060521').strip()
+    if admin_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '未授权'}), 401
+
+    data = request.json or {}
+    slot = data.get('slot', 'all')
+    covers, contents, ends, copies = get_pipeline_queues()
+    if slot == 'covers' or slot == 'all': covers = []
+    if slot == 'contents' or slot == 'all': contents = []
+    if slot == 'ends' or slot == 'all': ends = []
+    if slot == 'copies' or slot == 'all': copies = []
+    save_pipeline_queues(covers, contents, ends, copies)
+    return jsonify({'success': True, 'message': '已清空对应缓冲箱'})
+
 @app.route('/api/admin/materials/delete', methods=['POST'])
 def admin_delete_material():
     admin_pwd = request.headers.get('X-Admin-Password', '')
@@ -1409,17 +1561,121 @@ INDEX_HTML = """
                 <!-- UPLOAD TABS CONTAINER -->
                 <div class="border border-emerald-200 bg-emerald-50/70 rounded-2xl p-4 space-y-3">
                     <!-- Tab Switcher -->
-                    <div class="flex items-center space-x-2 border-b border-emerald-200/80 pb-3">
-                        <button onclick="switchUploadTab('batch')" id="tabBtnBatch" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white shadow-sm transition">
-                            ⚡️ 【批量图库拼装】(同事多选图1/图2/图3，一键生成几十组)
+                    <div class="flex items-center space-x-2 border-b border-emerald-200/80 pb-3 flex-wrap gap-1">
+                        <button onclick="switchUploadTab('pipeline')" id="tabBtnPipeline" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white shadow-sm transition">
+                            🏭 【流水线自动装配池】(零散传图，3槽+文案≥1自动吐出成品)
+                        </button>
+                        <button onclick="switchUploadTab('batch')" id="tabBtnBatch" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
+                            ⚡️ 【批量图库一次性拼装】
                         </button>
                         <button onclick="switchUploadTab('single')" id="tabBtnSingle" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
                             📌 【单组精准上传】
                         </button>
                     </div>
 
-                    <!-- TAB 1: BATCH AUTO ASSEMBLER -->
-                    <div id="batchUploadPanel" class="space-y-3 text-xs">
+                    <!-- TAB 1: PIPELINE AUTO ASSEMBLER QUEUE (NEW) -->
+                    <div id="pipelineUploadPanel" class="space-y-3 text-xs">
+                        <!-- Pipeline Live Status Banner -->
+                        <div class="p-3 bg-white rounded-xl border border-emerald-200 shadow-sm space-y-2.5">
+                            <div class="flex items-center justify-between flex-wrap gap-2">
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-xs font-bold text-slate-800">🏭 当前零件缓冲箱监控：</span>
+                                    <span id="pipelineStatusTip" class="text-[11px] text-emerald-800 font-medium">随时随地随手扔图，各模块 ≥ 1 立即自动装配</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <button onclick="clearPipelineBuffer('all')" class="text-[10px] text-slate-400 hover:text-red-600 transition font-medium">
+                                        🗑️ 一键清空所有缓冲箱
+                                    </button>
+                                    <button onclick="refreshPipelineStatus()" class="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-bold hover:bg-emerald-100 transition">
+                                        🔄 刷新库存
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- 4 Buffer Counter Chips -->
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                                <div class="p-2 bg-emerald-50 rounded-lg border border-emerald-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 封面图池 (图1)</div>
+                                    <div id="bufCountCovers" class="text-base font-black text-emerald-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeCovers" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                                <div class="p-2 bg-blue-50 rounded-lg border border-blue-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 内容图池 (图2)</div>
+                                    <div id="bufCountContents" class="text-base font-black text-blue-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeContents" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                                <div class="p-2 bg-purple-50 rounded-lg border border-purple-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 尾图池 (图3)</div>
+                                    <div id="bufCountEnds" class="text-base font-black text-purple-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeEnds" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                                <div class="p-2 bg-amber-50 rounded-lg border border-amber-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">📝 文案池</div>
+                                    <div id="bufCountCopies" class="text-base font-black text-amber-700 mt-0.5">0 篇</div>
+                                    <div id="bufBadgeCopies" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                            </div>
+
+                            <!-- Auto Assembly Progress Banner -->
+                            <div id="pipelineAssembleAlert" class="p-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 text-[11px] flex items-center justify-between">
+                                <span id="pipelineAlertText">💡 提示：4 个箱子均有图文（≥ 1）时，系统会自动消耗并组装成 100% 独家新作品进入下方素材库！</span>
+                            </div>
+                        </div>
+
+                        <!-- 4 Drop Modules -->
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <!-- Drop Slot 1: Covers -->
+                            <div class="bg-white p-3 rounded-xl border border-emerald-300 space-y-2">
+                                <div class="font-bold text-emerald-800 flex items-center justify-between">
+                                    <span>➕ 扔入【图1·封面图】</span>
+                                    <button onclick="clearPipelineBuffer('covers')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                </div>
+                                <input type="file" id="pipeSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('covers', 'pipeSlot1')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
+                                <p class="text-[9px] text-slate-400">选择文件立即自动加入封面缓冲池</p>
+                            </div>
+
+                            <!-- Drop Slot 2: Contents -->
+                            <div class="bg-white p-3 rounded-xl border border-blue-300 space-y-2">
+                                <div class="font-bold text-blue-800 flex items-center justify-between">
+                                    <span>➕ 扔入【图2·内容图】</span>
+                                    <button onclick="clearPipelineBuffer('contents')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                </div>
+                                <input type="file" id="pipeSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('contents', 'pipeSlot2')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
+                                <p class="text-[9px] text-slate-400">选择文件立即自动加入内容缓冲池</p>
+                            </div>
+
+                            <!-- Drop Slot 3: Ends -->
+                            <div class="bg-white p-3 rounded-xl border border-purple-300 space-y-2">
+                                <div class="font-bold text-purple-800 flex items-center justify-between">
+                                    <span>➕ 扔入【图3·尾图】</span>
+                                    <button onclick="clearPipelineBuffer('ends')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                </div>
+                                <input type="file" id="pipeSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('ends', 'pipeSlot3')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white cursor-pointer">
+                                <p class="text-[9px] text-slate-400">选择文件立即自动加入尾图缓冲池</p>
+                            </div>
+                        </div>
+
+                        <!-- Drop Slot 4: Copies -->
+                        <div class="bg-white p-3 rounded-xl border border-amber-300 space-y-2">
+                            <div class="flex items-center justify-between font-bold text-amber-800">
+                                <span>📝 批量补充文案 (多篇文案用 <code>===</code> 分隔)：</span>
+                                <button onclick="clearPipelineBuffer('copies')" class="text-[9px] text-slate-400 hover:text-red-500">清空文案箱</button>
+                            </div>
+                            <textarea id="pipeCopyInput" rows="3" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;第三篇文案..." 
+                                class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-xs text-slate-800"></textarea>
+                            <div class="flex justify-end">
+                                <button onclick="uploadPipelineCopies()" id="pipeCopyBtn" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-sm flex items-center space-x-1">
+                                    <span>📥 确认将文案加入文案箱并检测装配</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- TAB 2: BATCH AUTO ASSEMBLER -->
+                    <div id="batchUploadPanel" class="space-y-3 text-xs hidden">
                         <div class="p-2.5 bg-white/90 rounded-xl border border-emerald-200 text-emerald-900 leading-relaxed text-[11px]">
                             💡 <strong>批量拼装玩法</strong>：让同事在【图1】多选 20 张封面实况，在【图2】多选 20 张内容，在【图3】选尾图，下方粘贴 20 段文案（用 <code>===</code> 分隔），点击按钮系统<strong>1 秒自动拼装生成 20 组独家作品！</strong>
                         </div>
@@ -1473,7 +1729,7 @@ INDEX_HTML = """
                         </div>
                     </div>
 
-                    <!-- TAB 2: SINGLE SLOT UPLOAD -->
+                    <!-- TAB 3: SINGLE SLOT UPLOAD -->
                     <div id="singleUploadPanel" class="space-y-3 text-xs hidden">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">作品组名 / 标题：</label>
@@ -1944,24 +2200,211 @@ INDEX_HTML = """
         }
 
         function switchUploadTab(tab) {
+            const pipeP = document.getElementById('pipelineUploadPanel');
             const batchP = document.getElementById('batchUploadPanel');
             const singleP = document.getElementById('singleUploadPanel');
+            const pipeB = document.getElementById('tabBtnPipeline');
             const batchB = document.getElementById('tabBtnBatch');
             const singleB = document.getElementById('tabBtnSingle');
-            if (tab === 'batch') {
-                batchP.classList.remove('hidden');
-                singleP.classList.add('hidden');
-                batchB.classList.replace('bg-white', 'bg-emerald-600');
-                batchB.classList.replace('text-slate-700', 'text-white');
-                singleB.classList.replace('bg-emerald-600', 'bg-white');
-                singleB.classList.replace('text-white', 'text-slate-700');
+
+            const allP = [pipeP, batchP, singleP];
+            const allB = [pipeB, batchB, singleB];
+
+            allP.forEach(p => { if (p) p.classList.add('hidden'); });
+            allB.forEach(b => {
+                if (b) {
+                    b.classList.remove('bg-emerald-600', 'text-white');
+                    b.classList.add('bg-white', 'text-slate-700');
+                }
+            });
+
+            if (tab === 'pipeline') {
+                if (pipeP) pipeP.classList.remove('hidden');
+                if (pipeB) {
+                    pipeB.classList.remove('bg-white', 'text-slate-700');
+                    pipeB.classList.add('bg-emerald-600', 'text-white');
+                }
+                refreshPipelineStatus();
+            } else if (tab === 'batch') {
+                if (batchP) batchP.classList.remove('hidden');
+                if (batchB) {
+                    batchB.classList.remove('bg-white', 'text-slate-700');
+                    batchB.classList.add('bg-emerald-600', 'text-white');
+                }
             } else {
-                batchP.classList.add('hidden');
-                singleP.classList.remove('hidden');
-                singleB.classList.replace('bg-white', 'bg-emerald-600');
-                singleB.classList.replace('text-slate-700', 'text-white');
-                batchB.classList.replace('bg-emerald-600', 'bg-white');
-                batchB.classList.replace('text-white', 'text-slate-700');
+                if (singleP) singleP.classList.remove('hidden');
+                if (singleB) {
+                    singleB.classList.remove('bg-white', 'text-slate-700');
+                    singleB.classList.add('bg-emerald-600', 'text-white');
+                }
+            }
+        }
+
+        async function refreshPipelineStatus() {
+            try {
+                const res = await fetch('/api/admin/pipeline/status', {
+                    headers: { 'X-Admin-Password': adminAuthToken }
+                });
+                const data = await res.json();
+                if (data.success && data.counts) {
+                    const c = data.counts;
+                    const elCovers = document.getElementById('bufCountCovers');
+                    const elContents = document.getElementById('bufCountContents');
+                    const elEnds = document.getElementById('bufCountEnds');
+                    const elCopies = document.getElementById('bufCountCopies');
+                    
+                    if (elCovers) elCovers.innerText = c.covers + ' 张';
+                    if (elContents) elContents.innerText = c.contents + ' 张';
+                    if (elEnds) elEnds.innerText = c.ends + ' 张';
+                    if (elCopies) elCopies.innerText = c.copies + ' 篇';
+
+                    const updateBadge = (id, count) => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        if (count >= 1) {
+                            el.className = 'text-[9px] font-bold text-emerald-600';
+                            el.innerText = '🟢 已就绪 (' + count + ')';
+                        } else {
+                            el.className = 'text-[9px] font-bold text-red-500';
+                            el.innerText = '🔴 缺货待补';
+                        }
+                    };
+                    updateBadge('bufBadgeCovers', c.covers);
+                    updateBadge('bufBadgeContents', c.contents);
+                    updateBadge('bufBadgeEnds', c.ends);
+                    updateBadge('bufBadgeCopies', c.copies);
+
+                    const alertEl = document.getElementById('pipelineAlertText');
+                    if (alertEl) {
+                        if (c.covers >= 1 && c.contents >= 1 && c.ends >= 1 && c.copies >= 1) {
+                            alertEl.innerHTML = '<span class="text-emerald-700 font-bold">🎉 4 个模块均满足条件，系统已自动组装入库！当前素材库已全部就绪！</span>';
+                        } else {
+                            const missing = [];
+                            if (c.covers < 1) missing.push('【图1·封面图】');
+                            if (c.contents < 1) missing.push('【图2·内容图】');
+                            if (c.ends < 1) missing.push('【图3·尾图】');
+                            if (c.copies < 1) missing.push('【文案】');
+                            alertEl.innerHTML = '<span class="text-amber-700 font-medium">💡 正在等待补充 ' + missing.join('、') + '，只要各模块数量 ≥ 1，系统将瞬间自动拼装生成作品！</span>';
+                        }
+                    }
+                }
+            } catch (err) {}
+        }
+
+        async function uploadPipelineSlot(slotName, inputId) {
+            const input = document.getElementById(inputId);
+            if (!input || !input.files || input.files.length === 0) return;
+
+            const files = input.files;
+            showToast('正在将 ' + files.length + ' 个文件送入缓冲池...');
+
+            const base64List = [];
+            for (let i = 0; i < files.length; i++) {
+                base64List.push(await fileToBase64(files[i]));
+            }
+
+            try {
+                const res = await fetch('/api/admin/pipeline/push', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        slot: slotName,
+                        items: base64List
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    input.value = '';
+                    refreshPipelineStatus();
+                    loadAdminData();
+                } else {
+                    showToast(data.error || '入池失败');
+                }
+            } catch (err) {
+                showToast('上传入池失败');
+            }
+        }
+
+        async function uploadPipelineCopies() {
+            const input = document.getElementById('pipeCopyInput');
+            const text = input ? input.value.trim() : '';
+            if (!text) {
+                showToast('请先输入或粘贴文案内容！');
+                return;
+            }
+
+            const copies = text.split('===').map(c => c.trim()).filter(c => c.length > 0);
+            if (copies.length === 0) {
+                showToast('未识别到有效文案，请用 === 分隔多篇！');
+                return;
+            }
+
+            const btn = document.getElementById('pipeCopyBtn');
+            if (btn) {
+                btn.innerHTML = '<span>⏳ 正在入池...</span>';
+                btn.disabled = true;
+            }
+
+            try {
+                const res = await fetch('/api/admin/pipeline/push', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        slot: 'copies',
+                        items: copies
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message);
+                    input.value = '';
+                    refreshPipelineStatus();
+                    loadAdminData();
+                } else {
+                    showToast(data.error || '文案入池失败');
+                }
+            } catch (err) {
+                showToast('文案入池失败');
+            } finally {
+                if (btn) {
+                    btn.innerHTML = '<span>📥 确认将文案加入文案箱并检测装配</span>';
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        async function clearPipelineBuffer(slotName) {
+            const nameMap = {
+                'covers': '【图1·封面图箱】',
+                'contents': '【图2·内容图箱】',
+                'ends': '【图3·尾图箱】',
+                'copies': '【文案箱】',
+                'all': '【所有未装配的缓冲箱】'
+            };
+            const label = nameMap[slotName] || slotName;
+            if (!confirm('确定要清空 ' + label + ' 中的未装配零件吗？')) return;
+
+            try {
+                const res = await fetch('/api/admin/pipeline/clear', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({ slot: slotName })
+                });
+                const data = await res.json();
+                showToast(data.message);
+                refreshPipelineStatus();
+            } catch (err) {
+                showToast('清空失败');
             }
         }
 
@@ -2392,6 +2835,7 @@ INDEX_HTML = """
                 });
                 const data = await res.json();
                 if (data.success) {
+                    refreshPipelineStatus();
                     document.getElementById('statTotal').innerText = data.stats.total_materials;
                     document.getElementById('statAvailable').innerText = data.stats.available;
                     document.getElementById('statUnsettled').innerText = data.stats.unsettled_submissions || 0;

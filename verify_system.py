@@ -42,7 +42,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 1. 前端与 JavaScript 静态完整性自检 (AST 语法分析)
     # -------------------------------------------------------------
-    print("\n【测试 1/7】前端页面与 JavaScript 语法零阻断自检", flush=True)
+    print("\n【测试 1/8】前端页面与 JavaScript 语法零阻断自检", flush=True)
     script_match = re.search(r'<script>(.*?)</script>', INDEX_HTML, re.DOTALL)
     if not script_match:
         log_fail("未在 HTML 中找到 <script> 标签！")
@@ -61,7 +61,8 @@ def run_all_checks():
         'openAdmin', 'checkUserStatus', 'claimMaterial',
         'applySubmissionsFilter', 'copyFilteredLinks', 'setFilterDatePreset',
         'resetSubmissionsFilter', 'saveAdminSettings', 'addWhitelistItem', 'removeWhitelistItem',
-        'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement'
+        'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement',
+        'switchUploadTab', 'refreshPipelineStatus', 'uploadPipelineSlot', 'uploadPipelineCopies', 'clearPipelineBuffer'
     ]
     for fn in critical_functions:
         if f"function {fn}" not in js_content and f"{fn} = " not in js_content and f"async function {fn}" not in js_content:
@@ -71,7 +72,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 2. 数据库底座与 SQL 语句兼容性自检
     # -------------------------------------------------------------
-    print("\n【测试 2/7】数据库表结构与 LibSQL / ANSI 语法兼容性自检", flush=True)
+    print("\n【测试 2/8】数据库表结构与 LibSQL / ANSI 语法兼容性自检", flush=True)
     init_db()
     
     c.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -90,7 +91,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 3. 兼职身份鉴权与防作弊规则自检 (白名单/口令/混合模式)
     # -------------------------------------------------------------
-    print("\n【测试 3/7】兼职身份鉴权与四种防作弊模式逻辑自检", flush=True)
+    print("\n【测试 3/8】兼职身份鉴权与四种防作弊模式逻辑自检", flush=True)
     set_setting('passcode', '8888')
     set_setting('whitelist', '["测试小明", "测试小红"]')
 
@@ -121,7 +122,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 4. 兼职领料、图片流与打包下载全链路测试
     # -------------------------------------------------------------
-    print("\n【测试 4/7】兼职领料分发、ZIP打包与配图加载闭环自检", flush=True)
+    print("\n【测试 4/8】兼职领料分发、ZIP打包与配图加载闭环自检", flush=True)
     set_setting('auth_mode', 'passcode')
     client = app.test_client()
     
@@ -156,7 +157,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 5. 回传链接打卡与防重复提交测试
     # -------------------------------------------------------------
-    print("\n【测试 5/7】回传链接打卡与防作弊闭环自检", flush=True)
+    print("\n【测试 5/8】回传链接打卡与防作弊闭环自检", flush=True)
     test_link = "http://xhslink.com/a/test_auto_verify_123"
     
     # 录入打卡记录并归档
@@ -172,7 +173,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 6. 后台管理、数据查询与批量导出闭环自检
     # -------------------------------------------------------------
-    print("\n【测试 6/7】管理后台登录、多维数据筛选与 Excel/CSV 导出自检", flush=True)
+    print("\n【测试 6/8】管理后台登录、多维数据筛选与 Excel/CSV 导出自检", flush=True)
     admin_headers = {'X-Admin-Password': '060521'}
     
     stats_resp = client.get('/api/admin/stats', headers=admin_headers)
@@ -192,24 +193,48 @@ def run_all_checks():
     log_pass("Excel/CSV 完整台账导出成功，数据包含所有打卡明细")
 
     # -------------------------------------------------------------
-    # 7. 清理与重置测试数据（保持干净，恢复原有环境）
+    # 7. 流水线自动装配池（3槽+文案 >= 1 自动吐出成品）闭环自检
     # -------------------------------------------------------------
-    print("\n【测试 7/7】测试数据清理与素材池及初始配置 100% 自动恢复", flush=True)
+    print("\n【测试 7/8】流水线自动装配池（3槽+文案 ≥ 1 自动吐出作品）闭环自检", flush=True)
+    # 先清空测试用缓冲队列
+    client.post('/api/admin/pipeline/clear', headers=admin_headers, json={'slot': 'all'})
+    
+    # 步骤 A: 只上传封面、尾图、文案（缺内容图），验证不应触发装配
+    client.post('/api/admin/pipeline/push', headers=admin_headers, json={'slot': 'covers', 'items': ['data:image/png;base64,cover1']})
+    client.post('/api/admin/pipeline/push', headers=admin_headers, json={'slot': 'ends', 'items': ['data:image/png;base64,end1']})
+    r = client.post('/api/admin/pipeline/push', headers=admin_headers, json={'slot': 'copies', 'items': ['测试流水线文案第一篇\n#杭州代运营']}).get_json()
+    if r.get('assembled', 0) != 0:
+        log_fail("缺少内容图时，系统错误触发了拼装（应拦截等待）！")
+    log_pass("缺图2内容图时，系统成功保持等待状态，未错误生成残缺作品")
+
+    # 步骤 B: 补齐内容图，验证系统瞬间自动装配出 1 组完整作品
+    r2 = client.post('/api/admin/pipeline/push', headers=admin_headers, json={'slot': 'contents', 'items': ['data:image/png;base64,content1']}).get_json()
+    if r2.get('assembled', 0) != 1:
+        log_fail(f"补齐 4 个模块后，系统未能自动组装出 1 组作品: {r2}")
+    log_pass("4 槽全部 ≥ 1 齐备瞬间，系统 100% 自动装配并入库 1 组独家新作品！")
+
+    # -------------------------------------------------------------
+    # 8. 清理与重置测试数据（保持干净，恢复原有环境）
+    # -------------------------------------------------------------
+    print("\n【测试 8/8】测试数据清理与素材池及初始配置 100% 自动恢复", flush=True)
     c.execute("DELETE FROM submissions WHERE user_name = '自动化测试员'")
     c.execute("DELETE FROM users WHERE name = '自动化测试员'")
     c.execute("UPDATE materials SET status = 'available', assigned_to = NULL, assigned_at = NULL WHERE id = ?", (mat['id'],))
+    c.execute("DELETE FROM materials WHERE folder_path = 'pipeline_assembled'")
     conn.commit()
     conn.close()
     
     # 恢复最初的真实配置
+    client.post('/api/admin/pipeline/clear', headers=admin_headers, json={'slot': 'all'})
     set_setting('auth_mode', orig_auth_mode)
     set_setting('passcode', orig_passcode)
     set_setting('whitelist', orig_whitelist)
     log_pass("自动化回归测试生成的所有模拟临时数据与配置已 100% 原样恢复")
 
     print("\n" + "=" * 65, flush=True)
-    print("🎉 恭喜！全链路 7 大核心模块、42 项自动化回归检测【全部通过】！", flush=True)
+    print("🎉 恭喜！全链路 8 大核心模块、48 项自动化回归检测【全部通过】！", flush=True)
     print("=" * 65 + "\n", flush=True)
 
 if __name__ == '__main__':
     run_all_checks()
+
