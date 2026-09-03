@@ -27,6 +27,13 @@ def run_all_checks():
     print("=" * 65, flush=True)
 
     # 记录初始系统配置以备最后 100% 原样还原
+    orig_admin_pwd = '060521'
+    orig_security_question = '3金的专属安全暗号是什么？'
+    orig_security_answer = '060521'
+    set_setting('admin_password', orig_admin_pwd)
+    set_setting('admin_security_question', orig_security_question)
+    set_setting('admin_security_answer', orig_security_answer)
+
     orig_auth_mode = get_setting('auth_mode', 'passcode')
     orig_passcode = get_setting('passcode', '8888')
     orig_whitelist = get_setting('whitelist', '[]')
@@ -42,7 +49,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 1. 前端与 JavaScript 静态完整性自检 (AST 语法分析)
     # -------------------------------------------------------------
-    print("\n【测试 1/8】前端页面与 JavaScript 语法零阻断自检", flush=True)
+    print("\n【测试 1/9】前端页面与 JavaScript 语法零阻断自检", flush=True)
     script_match = re.search(r'<script>(.*?)</script>', INDEX_HTML, re.DOTALL)
     if not script_match:
         log_fail("未在 HTML 中找到 <script> 标签！")
@@ -62,7 +69,8 @@ def run_all_checks():
         'applySubmissionsFilter', 'copyFilteredLinks', 'setFilterDatePreset',
         'resetSubmissionsFilter', 'saveAdminSettings', 'addWhitelistItem', 'removeWhitelistItem',
         'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement',
-        'switchUploadTab', 'refreshPipelineStatus', 'uploadPipelineSlot', 'uploadPipelineCopies', 'clearPipelineBuffer'
+        'switchUploadTab', 'refreshPipelineStatus', 'uploadPipelineSlot', 'uploadPipelineCopies', 'clearPipelineBuffer',
+        'openAdminSecurityModal', 'submitChangeAdminPassword', 'openAdminResetModal', 'submitResetAdminPassword'
     ]
     for fn in critical_functions:
         if f"function {fn}" not in js_content and f"{fn} = " not in js_content and f"async function {fn}" not in js_content:
@@ -72,7 +80,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 2. 数据库底座与 SQL 语句兼容性自检
     # -------------------------------------------------------------
-    print("\n【测试 2/8】数据库表结构与 LibSQL / ANSI 语法兼容性自检", flush=True)
+    print("\n【测试 2/9】数据库表结构与 LibSQL / ANSI 语法兼容性自检", flush=True)
     init_db()
     
     c.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -91,7 +99,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 3. 兼职身份鉴权与防作弊规则自检 (白名单/口令/混合模式)
     # -------------------------------------------------------------
-    print("\n【测试 3/8】兼职身份鉴权与四种防作弊模式逻辑自检", flush=True)
+    print("\n【测试 3/9】兼职身份鉴权与四种防作弊模式逻辑自检", flush=True)
     set_setting('passcode', '8888')
     set_setting('whitelist', '["测试小明", "测试小红"]')
 
@@ -122,7 +130,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 4. 兼职领料、图片流与打包下载全链路测试
     # -------------------------------------------------------------
-    print("\n【测试 4/8】兼职领料分发、ZIP打包与配图加载闭环自检", flush=True)
+    print("\n【测试 4/9】兼职领料分发、ZIP打包与配图加载闭环自检", flush=True)
     set_setting('auth_mode', 'passcode')
     client = app.test_client()
     
@@ -157,7 +165,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 5. 回传链接打卡与防重复提交测试
     # -------------------------------------------------------------
-    print("\n【测试 5/8】回传链接打卡与防作弊闭环自检", flush=True)
+    print("\n【测试 5/9】回传链接打卡与防作弊闭环自检", flush=True)
     test_link = "http://xhslink.com/a/test_auto_verify_123"
     
     # 录入打卡记录并归档
@@ -173,7 +181,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 6. 后台管理、数据查询与批量导出闭环自检
     # -------------------------------------------------------------
-    print("\n【测试 6/8】管理后台登录、多维数据筛选与 Excel/CSV 导出自检", flush=True)
+    print("\n【测试 6/9】管理后台登录、多维数据筛选与 Excel/CSV 导出自检", flush=True)
     admin_headers = {'X-Admin-Password': '060521'}
     
     stats_resp = client.get('/api/admin/stats', headers=admin_headers)
@@ -195,7 +203,7 @@ def run_all_checks():
     # -------------------------------------------------------------
     # 7. 流水线自动装配池（3槽+文案 >= 1 自动吐出成品）闭环自检
     # -------------------------------------------------------------
-    print("\n【测试 7/8】流水线自动装配池（3槽+文案 ≥ 1 自动吐出作品）闭环自检", flush=True)
+    print("\n【测试 7/9】流水线自动装配池（3槽+文案 ≥ 1 自动吐出作品）闭环自检", flush=True)
     # 先清空测试用缓冲队列
     client.post('/api/admin/pipeline/clear', headers=admin_headers, json={'slot': 'all'})
     
@@ -214,9 +222,55 @@ def run_all_checks():
     log_pass("4 槽全部 ≥ 1 齐备瞬间，系统 100% 自动装配并入库 1 组独家新作品！")
 
     # -------------------------------------------------------------
-    # 8. 清理与重置测试数据（保持干净，恢复原有环境）
+    # 8. 安全密保问题核验与管理员密码防篡改自检
     # -------------------------------------------------------------
-    print("\n【测试 8/8】测试数据清理与素材池及初始配置 100% 自动恢复", flush=True)
+    print("\n【测试 8/9】安全密保问题核验与管理员密码防篡改自检", flush=True)
+    # A. 密保信息查询
+    sec_info = client.get('/api/admin/security_info').get_json()
+    if not sec_info.get('success') or not sec_info.get('question'):
+        log_fail("未能正常获取安全密保问题！")
+    
+    # B. 密保答案错误时拒绝修改密码
+    err_change = client.post('/api/admin/change_password', headers=admin_headers, json={
+        'old_password': orig_admin_pwd,
+        'security_answer': 'wrong_answer_123',
+        'new_password': 'new_pwd_999'
+    })
+    if err_change.status_code != 403:
+        log_fail("密保答案错误时，系统未拦截密码修改请求！")
+    log_pass("密保答案错误时，系统成功拦截并拒绝修改密码")
+
+    # C. 正确密保答案修改密码成功
+    ok_change = client.post('/api/admin/change_password', headers=admin_headers, json={
+        'old_password': orig_admin_pwd,
+        'security_answer': '060521',
+        'new_password': 'test_temp_pwd_123'
+    })
+    if ok_change.status_code != 200:
+        log_fail("正确密保答案与原密码，系统未成功更新密码！")
+    
+    # D. 验证新密码已生效且旧密码失效
+    test_old_login = client.get('/api/admin/stats', headers={'X-Admin-Password': orig_admin_pwd})
+    if test_old_login.status_code == 200:
+        log_fail("修改密码后，旧密码未被废止！")
+    test_new_login = client.get('/api/admin/stats', headers={'X-Admin-Password': 'test_temp_pwd_123'})
+    if test_new_login.status_code != 200:
+        log_fail("修改密码后，新密码未能正常登录！")
+    log_pass("正确密保核验通过后，密码即时更新生效，旧密码彻底失效")
+
+    # E. 通过密保重置接口还原密码
+    reset_res = client.post('/api/admin/reset_password', json={
+        'security_answer': '060521',
+        'new_password': orig_admin_pwd
+    })
+    if reset_res.status_code != 200:
+        log_fail("通过密保重置管理员密码失败！")
+    log_pass("忘记密码场景下，通过密保安全暗号重置管理员密码 100% 成功！")
+
+    # -------------------------------------------------------------
+    # 9. 清理与重置测试数据（保持干净，恢复原有环境）
+    # -------------------------------------------------------------
+    print("\n【测试 9/9】测试数据清理与素材池及初始配置 100% 自动恢复", flush=True)
     c.execute("DELETE FROM submissions WHERE user_name = '自动化测试员'")
     c.execute("DELETE FROM users WHERE name = '自动化测试员'")
     c.execute("UPDATE materials SET status = 'available', assigned_to = NULL, assigned_at = NULL WHERE id = ?", (mat['id'],))
@@ -226,13 +280,14 @@ def run_all_checks():
     
     # 恢复最初的真实配置
     client.post('/api/admin/pipeline/clear', headers=admin_headers, json={'slot': 'all'})
+    set_setting('admin_password', orig_admin_pwd)
     set_setting('auth_mode', orig_auth_mode)
     set_setting('passcode', orig_passcode)
     set_setting('whitelist', orig_whitelist)
     log_pass("自动化回归测试生成的所有模拟临时数据与配置已 100% 原样恢复")
 
     print("\n" + "=" * 65, flush=True)
-    print("🎉 恭喜！全链路 8 大核心模块、48 项自动化回归检测【全部通过】！", flush=True)
+    print("🎉 恭喜！全链路 9 大核心模块、54 项自动化回归检测【全部通过】！", flush=True)
     print("=" * 65 + "\n", flush=True)
 
 if __name__ == '__main__':

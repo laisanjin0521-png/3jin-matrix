@@ -216,6 +216,8 @@ def init_db():
 
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_question', '3金的专属安全暗号是什么？')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_answer', '060521')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'passcode')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
@@ -754,7 +756,71 @@ def admin_settings():
         'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
         'auto_delete_consumed': get_setting('auto_delete_consumed', '0') == '1',
         'admin_password': get_setting('admin_password', '060521'),
+        'admin_security_question': get_setting('admin_security_question', '3金的专属安全暗号是什么？'),
         'whitelist': whitelist
+    })
+
+@app.route('/api/admin/security_info', methods=['GET'])
+def get_admin_security_info():
+    return jsonify({
+        'success': True,
+        'question': get_setting('admin_security_question', '3金的专属安全暗号是什么？')
+    })
+
+@app.route('/api/admin/change_password', methods=['POST'])
+def admin_change_password():
+    admin_pwd = request.headers.get('X-Admin-Password', '').strip()
+    real_pwd = get_setting('admin_password', '060521').strip()
+    real_ans = get_setting('admin_security_answer', '060521').strip()
+    data = request.json or {}
+
+    old_pwd = data.get('old_password', '').strip()
+    sec_ans = data.get('security_answer', '').strip()
+    new_pwd = data.get('new_password', '').strip()
+    new_question = data.get('new_security_question', '').strip()
+    new_answer = data.get('new_security_answer', '').strip()
+
+    # Verify either valid admin header or old password
+    if admin_pwd != real_pwd and old_pwd != real_pwd:
+        return jsonify({'success': False, 'error': '原管理员密码验证不正确！'}), 403
+
+    # Verify security answer
+    if sec_ans != real_ans:
+        return jsonify({'success': False, 'error': '密保答案不正确，无法修改密码！'}), 403
+
+    if not new_pwd:
+        return jsonify({'success': False, 'error': '新管理密码不能为空！'}), 400
+
+    set_setting('admin_password', new_pwd)
+    if new_question:
+        set_setting('admin_security_question', new_question)
+    if new_answer:
+        set_setting('admin_security_answer', new_answer)
+
+    return jsonify({
+        'success': True,
+        'message': '管理员密码及安全密保已成功修改！',
+        'new_password': new_pwd
+    })
+
+@app.route('/api/admin/reset_password', methods=['POST'])
+def admin_reset_password():
+    data = request.json or {}
+    sec_ans = data.get('security_answer', '').strip()
+    new_pwd = data.get('new_password', '').strip()
+    real_ans = get_setting('admin_security_answer', '060521').strip()
+
+    if not sec_ans or sec_ans != real_ans:
+        return jsonify({'success': False, 'error': '密保答案不正确，无法重置密码！'}), 403
+
+    if not new_pwd:
+        return jsonify({'success': False, 'error': '新管理密码不能为空！'}), 400
+
+    set_setting('admin_password', new_pwd)
+    return jsonify({
+        'success': True,
+        'message': '密保核验通过！管理员密码已成功重置！',
+        'new_password': new_pwd
     })
 
 @app.route('/api/admin/whitelist/add', methods=['POST'])
@@ -1435,11 +1501,127 @@ INDEX_HTML = """
             </div>
             <div>
                 <input type="password" id="adminPwdInput" placeholder="输入管理密码" 
-                    class="w-full px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white text-center font-bold tracking-widest">
+                    class="w-full px-3 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white text-center font-bold tracking-widest"
+                    onkeypress="if(event.key==='Enter') verifyAdminLogin()">
             </div>
             <div class="flex gap-2">
                 <button onclick="closeAdminLogin()" class="flex-1 py-2.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold transition">取消</button>
                 <button onclick="verifyAdminLogin()" class="flex-1 py-2.5 text-xs bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold transition shadow-sm">进入后台</button>
+            </div>
+            <div class="text-center pt-1 border-t border-slate-100">
+                <button onclick="openAdminResetModal()" class="text-[11px] text-amber-600 hover:text-amber-700 font-bold transition hover:underline">
+                    ❓ 忘记密码？通过安全密保找回 / 重置
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Reset Password by Security Question Modal -->
+    <div id="adminResetModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div class="text-center">
+                <div class="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto text-2xl mb-2">🛡️</div>
+                <h3 class="font-bold text-base text-slate-900">密保重置管理员密码</h3>
+                <p class="text-xs text-slate-400 mt-0.5">回答安全密保暗号即可重置并登录</p>
+            </div>
+            <div class="bg-amber-50 p-3 rounded-xl border border-amber-200 space-y-1">
+                <div class="text-[11px] font-bold text-amber-800">密保问题：</div>
+                <div id="resetModalQuestionText" class="text-xs font-bold text-slate-800 bg-white p-2 rounded-lg border border-amber-200">加载中...</div>
+            </div>
+            <div class="space-y-2">
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-700 mb-0.5">密保答案：</label>
+                    <input type="text" id="resetSecurityAnswer" placeholder="输入密保答案" 
+                        class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white font-bold">
+                </div>
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-700 mb-0.5">新管理密码：</label>
+                    <input type="password" id="resetNewPassword" placeholder="输入新密码" 
+                        class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white font-bold">
+                </div>
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-700 mb-0.5">确认新密码：</label>
+                    <input type="password" id="resetNewPasswordConfirm" placeholder="再次输入新密码" 
+                        class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white font-bold">
+                </div>
+            </div>
+            <div class="flex gap-2 pt-1">
+                <button onclick="closeAdminResetModal()" class="flex-1 py-2.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold transition">返回</button>
+                <button onclick="submitResetAdminPassword()" class="flex-1 py-2.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold transition shadow-sm">🚀 验证并重置</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Change Password & Security Settings Modal -->
+    <div id="adminSecurityModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
+            <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div class="flex items-center space-x-2">
+                    <span class="text-xl">🛡️</span>
+                    <div>
+                        <h3 class="font-bold text-base text-slate-900">管理员密码与密保管理</h3>
+                        <p class="text-[11px] text-slate-400">修改密码需验证密保答案，防止未授权修改</p>
+                    </div>
+                </div>
+                <button onclick="closeAdminSecurityModal()" class="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+            </div>
+            
+            <div class="space-y-3 text-xs">
+                <div>
+                    <label class="block font-bold text-slate-700 mb-1">🔑 当前管理员原密码：</label>
+                    <input type="password" id="secOldPassword" placeholder="输入当前管理密码" 
+                        class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white">
+                </div>
+
+                <div class="bg-amber-50/80 p-3 rounded-xl border border-amber-200 space-y-2">
+                    <div class="text-[11px] font-bold text-amber-900 flex items-center space-x-1">
+                        <span>🛡️ 安全密保问题：</span>
+                    </div>
+                    <div id="secCurrentQuestionDisplay" class="font-bold text-slate-900 bg-white p-2.5 rounded-lg border border-amber-200 text-xs">
+                        加载中...
+                    </div>
+                    <div>
+                        <label class="block font-bold text-slate-700 mb-1">💬 请输入密保答案进行安全核验：</label>
+                        <input type="text" id="secSecurityAnswer" placeholder="输入密保答案" 
+                            class="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-500">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                        <label class="block font-bold text-slate-700 mb-1">🆕 设置新管理密码：</label>
+                        <input type="password" id="secNewPassword" placeholder="输入新密码" 
+                            class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white">
+                    </div>
+                    <div>
+                        <label class="block font-bold text-slate-700 mb-1">🆕 确认新管理密码：</label>
+                        <input type="password" id="secNewPasswordConfirm" placeholder="再次输入新密码" 
+                            class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white">
+                    </div>
+                </div>
+
+                <div class="pt-2 border-t border-slate-100">
+                    <button type="button" onclick="toggleCustomQuestionBox()" class="text-[11px] text-amber-600 hover:text-amber-700 font-bold transition flex items-center space-x-1">
+                        <span>🔄 顺便修改密保问题与密保答案 (可选) ▼</span>
+                    </button>
+                    <div id="customQuestionBox" class="mt-2 space-y-2 p-3 bg-slate-50 rounded-xl border border-slate-200 hidden">
+                        <div>
+                            <label class="block text-[11px] font-bold text-slate-600 mb-0.5">新的密保问题：</label>
+                            <input type="text" id="secNewCustomQuestion" placeholder="如: 你的初中名字/专属暗号" 
+                                class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-bold text-slate-600 mb-0.5">新的密保答案：</label>
+                            <input type="text" id="secNewCustomAnswer" placeholder="如: 自定义新答案" 
+                                class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex gap-2 pt-2 border-t border-slate-100">
+                <button onclick="closeAdminSecurityModal()" class="flex-1 py-2.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold transition">取消</button>
+                <button onclick="submitChangeAdminPassword()" class="flex-1 py-2.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold transition shadow-sm">💾 验证密保并更新</button>
             </div>
         </div>
     </div>
@@ -1521,9 +1703,11 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">4. 🔐 管理员登录密码：</label>
-                            <input type="text" id="settingAdminPassword" placeholder="如: 060521" 
-                                class="w-full px-3 py-1.5 bg-white border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 font-bold text-red-700 text-xs">
+                            <label class="block font-semibold text-slate-700 mb-1">4. 🔐 密码与密保管理：</label>
+                            <button type="button" onclick="openAdminSecurityModal()" 
+                                class="w-full px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-sm">
+                                <span>🛡️ 修改密码 & 密保</span>
+                            </button>
                         </div>
                     </div>
 
@@ -2496,6 +2680,159 @@ INDEX_HTML = """
             }
         }
 
+        let currentSecurityQuestion = '3金的专属安全暗号是什么？';
+
+        async function openAdminResetModal() {
+            try {
+                const res = await fetch('/api/admin/security_info');
+                const data = await res.json();
+                if (data.success && data.question) {
+                    currentSecurityQuestion = data.question;
+                }
+            } catch (err) {}
+            const qEl = document.getElementById('resetModalQuestionText');
+            if (qEl) qEl.innerText = currentSecurityQuestion;
+            document.getElementById('resetSecurityAnswer').value = '';
+            document.getElementById('resetNewPassword').value = '';
+            document.getElementById('resetNewPasswordConfirm').value = '';
+            document.getElementById('adminLoginModal').classList.add('hidden');
+            document.getElementById('adminResetModal').classList.remove('hidden');
+        }
+
+        function closeAdminResetModal() {
+            document.getElementById('adminResetModal').classList.add('hidden');
+            document.getElementById('adminLoginModal').classList.remove('hidden');
+        }
+
+        async function submitResetAdminPassword() {
+            const answer = document.getElementById('resetSecurityAnswer').value.trim();
+            const newPwd = document.getElementById('resetNewPassword').value.trim();
+            const newPwdConfirm = document.getElementById('resetNewPasswordConfirm').value.trim();
+
+            if (!answer) {
+                showToast('请输入密保答案！');
+                return;
+            }
+            if (!newPwd) {
+                showToast('请输入新管理密码！');
+                return;
+            }
+            if (newPwd !== newPwdConfirm) {
+                showToast('两次输入的新密码不一致！');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/admin/reset_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        security_answer: answer,
+                        new_password: newPwd
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    adminAuthToken = data.new_password || newPwd;
+                    localStorage.setItem('xhs_admin_pwd', adminAuthToken);
+                    document.getElementById('adminResetModal').classList.add('hidden');
+                    document.getElementById('adminLoginModal').classList.add('hidden');
+                    document.getElementById('adminModal').classList.remove('hidden');
+                    loadAdminData();
+                    loadAdminSettings();
+                    showToast(data.message);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('重置密码失败');
+            }
+        }
+
+        async function openAdminSecurityModal() {
+            try {
+                const res = await fetch('/api/admin/security_info');
+                const data = await res.json();
+                if (data.success && data.question) {
+                    currentSecurityQuestion = data.question;
+                }
+            } catch (err) {}
+            const qEl = document.getElementById('secCurrentQuestionDisplay');
+            if (qEl) qEl.innerText = currentSecurityQuestion;
+            document.getElementById('secOldPassword').value = '';
+            document.getElementById('secSecurityAnswer').value = '';
+            document.getElementById('secNewPassword').value = '';
+            document.getElementById('secNewPasswordConfirm').value = '';
+            document.getElementById('secNewCustomQuestion').value = '';
+            document.getElementById('secNewCustomAnswer').value = '';
+            document.getElementById('customQuestionBox').classList.add('hidden');
+            document.getElementById('adminSecurityModal').classList.remove('hidden');
+        }
+
+        function closeAdminSecurityModal() {
+            document.getElementById('adminSecurityModal').classList.add('hidden');
+        }
+
+        function toggleCustomQuestionBox() {
+            const box = document.getElementById('customQuestionBox');
+            if (box) box.classList.toggle('hidden');
+        }
+
+        async function submitChangeAdminPassword() {
+            const oldPwd = document.getElementById('secOldPassword').value.trim();
+            const answer = document.getElementById('secSecurityAnswer').value.trim();
+            const newPwd = document.getElementById('secNewPassword').value.trim();
+            const newPwdConfirm = document.getElementById('secNewPasswordConfirm').value.trim();
+            const newQuestion = document.getElementById('secNewCustomQuestion').value.trim();
+            const newAnswer = document.getElementById('secNewCustomAnswer').value.trim();
+
+            if (!oldPwd) {
+                showToast('请输入当前管理员原密码！');
+                return;
+            }
+            if (!answer) {
+                showToast('请输入密保答案进行安全核验！');
+                return;
+            }
+            if (!newPwd) {
+                showToast('请输入新管理密码！');
+                return;
+            }
+            if (newPwd !== newPwdConfirm) {
+                showToast('两次输入的新密码不一致！');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/admin/change_password', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Password': adminAuthToken
+                    },
+                    body: JSON.stringify({
+                        old_password: oldPwd,
+                        security_answer: answer,
+                        new_password: newPwd,
+                        new_security_question: newQuestion,
+                        new_security_answer: newAnswer
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    adminAuthToken = data.new_password || newPwd;
+                    localStorage.setItem('xhs_admin_pwd', adminAuthToken);
+                    closeAdminSecurityModal();
+                    loadAdminSettings();
+                    showToast(data.message);
+                } else {
+                    showToast(data.error);
+                }
+            } catch (err) {
+                showToast('更新密码失败');
+            }
+        }
+
         async function loadAdminSettings() {
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -2506,8 +2843,9 @@ INDEX_HTML = """
                     document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
                     document.getElementById('settingPasscode').value = data.passcode || '8888';
                     document.getElementById('settingTimeoutHours').value = data.claim_timeout_hours || 2;
-                    const adminPwdInput = document.getElementById('settingAdminPassword');
-                    if (adminPwdInput) adminPwdInput.value = data.admin_password || '060521';
+                    if (data.admin_security_question) {
+                        currentSecurityQuestion = data.admin_security_question;
+                    }
                     
                     const localCached = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
                     const serverList = Array.isArray(data.whitelist) ? data.whitelist : [];
@@ -2551,7 +2889,6 @@ INDEX_HTML = """
             const auth_mode = document.getElementById('settingAuthMode').value;
             const passcode = document.getElementById('settingPasscode').value.trim();
             const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
-            const admin_pwd = document.getElementById('settingAdminPassword') ? document.getElementById('settingAdminPassword').value.trim() : '';
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -2564,16 +2901,11 @@ INDEX_HTML = """
                         auth_mode: auth_mode,
                         passcode: passcode,
                         claim_timeout_hours: timeout_hours,
-                        admin_password: admin_pwd,
                         whitelist: currentWhitelist
                     })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    if (admin_pwd) {
-                        adminAuthToken = admin_pwd;
-                        localStorage.setItem('xhs_admin_pwd', admin_pwd);
-                    }
                     showToast(data.message);
                 } else {
                     showToast(data.error);
