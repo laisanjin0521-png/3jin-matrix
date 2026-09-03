@@ -2002,11 +2002,20 @@ INDEX_HTML = """
 
                         <!-- Drop Slot 4: Copies -->
                         <div class="bg-white p-3 rounded-xl border border-amber-300 space-y-2">
-                            <div class="flex items-center justify-between font-bold text-amber-800">
-                                <span>📝 批量补充文案 (多篇文案用 <code>===</code> 分隔)：</span>
-                                <button onclick="clearPipelineBuffer('copies')" class="text-[9px] text-slate-400 hover:text-red-500">清空文案箱</button>
+                            <div class="flex items-center justify-between font-bold text-amber-800 flex-wrap gap-1">
+                                <span class="flex items-center space-x-1">
+                                    <span>📝 补充文案池</span>
+                                    <span class="text-[10px] text-slate-400 font-normal">(支持粘贴或上传 .txt 文件，多篇用 <code>===</code> 分隔)</span>
+                                </span>
+                                <div class="flex items-center space-x-2">
+                                    <label class="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
+                                        <span>📁 批量上传 .txt 文案</span>
+                                        <input type="file" id="pipeTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handlePipelineTxtUpload(event)" class="hidden">
+                                    </label>
+                                    <button onclick="clearPipelineBuffer('copies')" class="text-[9px] text-slate-400 hover:text-red-500">清空文案箱</button>
+                                </div>
                             </div>
-                            <textarea id="pipeCopyInput" rows="3" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;第三篇文案..." 
+                            <textarea id="pipeCopyInput" rows="3" placeholder="可以直接在此输入/粘贴文案（多篇用 === 分隔），也可以点击上方【📁 批量上传 .txt 文案】一键导入..." 
                                 class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-xs text-slate-800"></textarea>
                             <div class="flex justify-end">
                                 <button onclick="uploadPipelineCopies()" id="pipeCopyBtn" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-sm flex items-center space-x-1">
@@ -2019,7 +2028,7 @@ INDEX_HTML = """
                     <!-- TAB 2: BATCH AUTO ASSEMBLER -->
                     <div id="batchUploadPanel" class="space-y-3 text-xs hidden">
                         <div class="p-2.5 bg-white/90 rounded-xl border border-emerald-200 text-emerald-900 leading-relaxed text-[11px]">
-                            💡 <strong>批量拼装玩法</strong>：让同事在【图1】多选 20 张封面实况，在【图2】多选 20 张内容，在【图3】选尾图，下方粘贴 20 段文案（用 <code>===</code> 分隔），点击按钮系统<strong>1 秒自动拼装生成 20 组独家作品！</strong>
+                            💡 <strong>批量拼装玩法</strong>：让同事在【图1】多选 20 张封面实况，在【图2】多选 20 张内容，在【图3】选尾图，下方粘贴 20 段文案或点击【📁 批量上传 .txt 文案】，点击按钮系统<strong>1 秒自动拼装生成 20 组独家作品！</strong>
                         </div>
 
                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -2055,10 +2064,16 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">
-                                批量文案池 (每篇文案用三个等号 <code>===</code> 隔开，第一行自动作为标题)：
-                            </label>
-                            <textarea id="batchCopyInput" rows="5" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;第三篇文案内容..." 
+                            <div class="flex items-center justify-between font-semibold text-slate-700 mb-1 flex-wrap gap-1">
+                                <label>
+                                    批量文案池 (每篇文案用三个等号 <code>===</code> 隔开，第一行自动作为标题)：
+                                </label>
+                                <label class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
+                                    <span>📁 批量上传 .txt 文案</span>
+                                    <input type="file" id="batchTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handleBatchTxtUpload(event)" class="hidden">
+                                </label>
+                            </div>
+                            <textarea id="batchCopyInput" rows="5" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;（支持点击右上角【📁 批量上传 .txt 文案】一次性导入多个 .txt 文件）" 
                                 class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs font-mono"></textarea>
                         </div>
 
@@ -2128,8 +2143,14 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">发布文案：</label>
-                            <textarea id="newCopyInput" rows="3" placeholder="粘贴单篇文案..." 
+                            <div class="flex items-center justify-between font-semibold text-slate-700 mb-1">
+                                <label>发布文案 (第一行自动作为标题，末尾带 #Tag)：</label>
+                                <label class="px-2.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
+                                    <span>📄 上传 .txt 文案</span>
+                                    <input type="file" id="singleTxtFileInput" accept=".txt,.text,text/plain" onchange="handleSingleTxtUpload(event)" class="hidden">
+                                </label>
+                            </div>
+                            <textarea id="newCopyInput" rows="3" placeholder="粘贴单篇文案或点击上方【📄 上传 .txt 文案】..." 
                                 class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs"></textarea>
                         </div>
 
@@ -2772,6 +2793,106 @@ INDEX_HTML = """
             } catch (err) {
                 showToast('上传入池失败');
             }
+        }
+
+        async function readTextFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = (e) => reject(e);
+                reader.readAsText(file, 'utf-8');
+            });
+        }
+
+        async function handlePipelineTxtUpload(event) {
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
+            const copies = [];
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const text = await readTextFile(files[i]);
+                    if (text.includes('===')) {
+                        const parts = text.split('===').map(p => p.trim()).filter(p => p.length > 0);
+                        copies.push(...parts);
+                    } else if (text.trim()) {
+                        copies.push(text.trim());
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+            if (copies.length === 0) {
+                showToast('未能从所选文件中读取到有效文案');
+                return;
+            }
+            const sep = String.fromCharCode(10) + String.fromCharCode(10) + '===' + String.fromCharCode(10) + String.fromCharCode(10);
+            const pipeInput = document.getElementById('pipeCopyInput');
+            if (pipeInput) {
+                const current = pipeInput.value.trim();
+                if (current) {
+                    pipeInput.value = current + sep + copies.join(sep);
+                } else {
+                    pipeInput.value = copies.join(sep);
+                }
+            }
+            showToast('🎉 成功从 ' + files.length + ' 个 .txt 文件中读取 ' + copies.length + ' 篇文案！');
+            event.target.value = '';
+        }
+
+        async function handleBatchTxtUpload(event) {
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
+            const copies = [];
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const text = await readTextFile(files[i]);
+                    if (text.includes('===')) {
+                        const parts = text.split('===').map(p => p.trim()).filter(p => p.length > 0);
+                        copies.push(...parts);
+                    } else if (text.trim()) {
+                        copies.push(text.trim());
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+            if (copies.length === 0) {
+                showToast('未能从所选文件中读取到有效文案');
+                return;
+            }
+            const sep = String.fromCharCode(10) + String.fromCharCode(10) + '===' + String.fromCharCode(10) + String.fromCharCode(10);
+            const batchInput = document.getElementById('batchCopyInput');
+            if (batchInput) {
+                const current = batchInput.value.trim();
+                if (current) {
+                    batchInput.value = current + sep + copies.join(sep);
+                } else {
+                    batchInput.value = copies.join(sep);
+                }
+            }
+            showToast('🎉 成功从 ' + files.length + ' 个 .txt 文件中读取 ' + copies.length + ' 篇文案！');
+            event.target.value = '';
+        }
+
+        async function handleSingleTxtUpload(event) {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            try {
+                const text = await readTextFile(file);
+                const singleInput = document.getElementById('newCopyInput');
+                if (singleInput) {
+                    singleInput.value = text.trim();
+                    const firstLine = text.trim().split(String.fromCharCode(10))[0].trim();
+                    const groupInput = document.getElementById('newGroupInput');
+                    if (groupInput && !groupInput.value.trim() && firstLine) {
+                        groupInput.value = firstLine.substring(0, 30);
+                    }
+                }
+                showToast('🎉 成功读取文案: ' + file.name);
+            } catch (e) {
+                showToast('读取文案文件失败');
+            }
+            event.target.value = '';
         }
 
         async function uploadPipelineCopies() {

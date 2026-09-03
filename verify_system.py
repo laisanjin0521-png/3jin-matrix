@@ -96,6 +96,7 @@ def run_all_checks():
         'resetSubmissionsFilter', 'saveAdminSettings', 'addWhitelistItem', 'removeWhitelistItem',
         'releaseExpiredAssignments', 'inspectSurvivalStatus', 'toggleSettlement',
         'switchUploadTab', 'refreshPipelineStatus', 'uploadPipelineSlot', 'uploadPipelineCopies', 'clearPipelineBuffer',
+        'readTextFile', 'handlePipelineTxtUpload', 'handleBatchTxtUpload', 'handleSingleTxtUpload',
         'openAdminSecurityModal', 'submitChangeAdminPassword', 'openAdminResetModal', 'submitResetAdminPassword'
     ]
     for fn in critical_functions:
