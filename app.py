@@ -1497,7 +1497,7 @@ INDEX_HTML = """
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">1. 领料验证模式：</label>
                             <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
@@ -1509,15 +1509,21 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">2. 统一领料口令：</label>
+                            <label class="block font-semibold text-slate-700 mb-1">2. 兼职领料口令：</label>
                             <input type="text" id="settingPasscode" placeholder="如: 8888" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 领料超时自动退回 (小时)：</label>
+                            <label class="block font-semibold text-slate-700 mb-1">3. 超时退回 (小时)：</label>
                             <input type="number" id="settingTimeoutHours" step="0.5" min="0.5" max="24" placeholder="如: 2" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">4. 🔐 管理员登录密码：</label>
+                            <input type="text" id="settingAdminPassword" placeholder="如: 060521" 
+                                class="w-full px-3 py-1.5 bg-white border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 font-bold text-red-700 text-xs">
                         </div>
                     </div>
 
@@ -2500,6 +2506,8 @@ INDEX_HTML = """
                     document.getElementById('settingAuthMode').value = data.auth_mode || 'passcode';
                     document.getElementById('settingPasscode').value = data.passcode || '8888';
                     document.getElementById('settingTimeoutHours').value = data.claim_timeout_hours || 2;
+                    const adminPwdInput = document.getElementById('settingAdminPassword');
+                    if (adminPwdInput) adminPwdInput.value = data.admin_password || '060521';
                     
                     const localCached = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
                     const serverList = Array.isArray(data.whitelist) ? data.whitelist : [];
@@ -2543,6 +2551,7 @@ INDEX_HTML = """
             const auth_mode = document.getElementById('settingAuthMode').value;
             const passcode = document.getElementById('settingPasscode').value.trim();
             const timeout_hours = document.getElementById('settingTimeoutHours').value.trim();
+            const admin_pwd = document.getElementById('settingAdminPassword') ? document.getElementById('settingAdminPassword').value.trim() : '';
 
             try {
                 const res = await fetch('/api/admin/settings', {
@@ -2555,11 +2564,16 @@ INDEX_HTML = """
                         auth_mode: auth_mode,
                         passcode: passcode,
                         claim_timeout_hours: timeout_hours,
+                        admin_password: admin_pwd,
                         whitelist: currentWhitelist
                     })
                 });
                 const data = await res.json();
                 if (data.success) {
+                    if (admin_pwd) {
+                        adminAuthToken = admin_pwd;
+                        localStorage.setItem('xhs_admin_pwd', admin_pwd);
+                    }
                     showToast(data.message);
                 } else {
                     showToast(data.error);
