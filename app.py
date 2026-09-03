@@ -2606,12 +2606,13 @@ INDEX_HTML = """
                 showToast('当前没有查询到任何回传记录！');
                 return;
             }
+            const nl = String.fromCharCode(10);
             const linkList = currentlyFilteredSubmissions.map((s, idx) => 
-                `${idx + 1}. 【${s.user_name}】 ${s.material_name} (${s.submitted_at}):\n${s.xhs_link}`
-            ).join('\n\n');
+                (idx + 1) + '. 【' + (s.user_name || '') + '】 ' + (s.material_name || '') + ' (' + (s.submitted_at || '-') + '):' + nl + s.xhs_link
+            ).join(nl + nl);
             
             navigator.clipboard.writeText(linkList).then(() => {
-                showToast(`🎉 成功批量复制 ${currentlyFilteredSubmissions.length} 条回传链接！`);
+                showToast('🎉 成功批量复制 ' + currentlyFilteredSubmissions.length + ' 条回传链接！');
             }).catch(() => {
                 showToast('复制失败，请重试');
             });
