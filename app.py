@@ -2015,44 +2015,53 @@ INDEX_HTML = """
                             </div>
 
                             <!-- Auto Assembly Progress Banner -->
-                            <div id="pipelineAssembleAlert" class="p-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 text-[11px] flex items-center justify-between">
-                                <span id="pipelineAlertText">💡 提示：4 个箱子均有图文（≥ 1）时，系统会自动消耗并组装成 100% 独家新作品进入下方素材库！</span>
+                            <div id="pipelineAssembleAlert" class="p-2.5 rounded-xl bg-indigo-50/80 border border-indigo-200 text-indigo-950 text-xs flex items-center justify-between shadow-xs">
+                                <span id="pipelineAlertText">💡 提示：4 个箱子各有 ≥ 1 时，系统会自动消耗 1 套组装成新笔记（新笔记直接进入下方素材库）。如果放入后发现数量减少，说明已经成功合体生成作品了！</span>
                             </div>
                         </div>
 
                         <!-- 4 Drop Modules -->
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <!-- Drop Slot 1: Covers -->
-                            <div class="bg-white p-3 rounded-xl border border-emerald-300 space-y-2">
+                            <div id="dropZoneSlot1" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50/30 transition-all duration-200 space-y-2">
                                 <div class="font-bold text-emerald-800 flex items-center justify-between">
-                                    <span>➕ 扔入【图1·封面图】</span>
-                                    <button onclick="clearPipelineBuffer('covers')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                    <span class="flex items-center space-x-1">
+                                        <span>🖼️【图1·封面图】</span>
+                                    </span>
+                                    <button onclick="clearPipelineBuffer('covers')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
                                 </div>
                                 <input type="file" id="pipeSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('covers', 'pipeSlot1')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
-                                <p class="text-[9px] text-slate-400">选择文件立即自动加入封面缓冲池</p>
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
+                                <div id="pipeProgressSlot1" class="hidden p-2 bg-emerald-50 rounded-lg border border-emerald-200 text-xs"></div>
+                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
                             </div>
 
                             <!-- Drop Slot 2: Contents -->
-                            <div class="bg-white p-3 rounded-xl border border-blue-300 space-y-2">
+                            <div id="dropZoneSlot2" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-blue-300 hover:border-blue-500 hover:bg-blue-50/30 transition-all duration-200 space-y-2">
                                 <div class="font-bold text-blue-800 flex items-center justify-between">
-                                    <span>➕ 扔入【图2·内容图】</span>
-                                    <button onclick="clearPipelineBuffer('contents')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                    <span class="flex items-center space-x-1">
+                                        <span>🎨【图2·内容图】</span>
+                                    </span>
+                                    <button onclick="clearPipelineBuffer('contents')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
                                 </div>
                                 <input type="file" id="pipeSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('contents', 'pipeSlot2')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
-                                <p class="text-[9px] text-slate-400">选择文件立即自动加入内容缓冲池</p>
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer">
+                                <div id="pipeProgressSlot2" class="hidden p-2 bg-blue-50 rounded-lg border border-blue-200 text-xs"></div>
+                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
                             </div>
 
                             <!-- Drop Slot 3: Ends -->
-                            <div class="bg-white p-3 rounded-xl border border-purple-300 space-y-2">
+                            <div id="dropZoneSlot3" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-purple-300 hover:border-purple-500 hover:bg-purple-50/30 transition-all duration-200 space-y-2">
                                 <div class="font-bold text-purple-800 flex items-center justify-between">
-                                    <span>➕ 扔入【图3·尾图】</span>
-                                    <button onclick="clearPipelineBuffer('ends')" class="text-[9px] text-slate-400 hover:text-red-500">清空此箱</button>
+                                    <span class="flex items-center space-x-1">
+                                        <span>🌅【图3·尾图】</span>
+                                    </span>
+                                    <button onclick="clearPipelineBuffer('ends')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
                                 </div>
                                 <input type="file" id="pipeSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('ends', 'pipeSlot3')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white cursor-pointer">
-                                <p class="text-[9px] text-slate-400">选择文件立即自动加入尾图缓冲池</p>
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white hover:file:bg-purple-700 cursor-pointer">
+                                <div id="pipeProgressSlot3" class="hidden p-2 bg-purple-50 rounded-lg border border-purple-200 text-xs"></div>
+                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
                             </div>
                         </div>
 
@@ -2362,6 +2371,7 @@ INDEX_HTML = """
             const nameEl = document.getElementById('userNameInput');
             if (nameEl && savedName) nameEl.value = savedName;
             if (savedName) checkUserStatus();
+            setupPipelineDropZones();
         });
 
         function saveCredentials() {
@@ -2664,6 +2674,7 @@ INDEX_HTML = """
         }
 
         function logoutAdmin() {
+            stopPipelinePolling();
             adminAuthToken = '';
             localStorage.removeItem('xhs_admin_pwd');
             document.getElementById('adminModal').classList.add('hidden');
@@ -2716,8 +2727,11 @@ INDEX_HTML = """
                 modal.classList.remove('hidden');
                 loadAdminData();
                 loadAdminSettings();
+                refreshPipelineStatus();
+                startPipelinePolling();
             } else {
                 modal.classList.add('hidden');
+                stopPipelinePolling();
             }
         }
 
@@ -2813,19 +2827,73 @@ INDEX_HTML = """
             } catch (err) {}
         }
 
-        async function uploadPipelineSlot(slotName, inputId) {
+        let pipelinePollingTimer = null;
+        function startPipelinePolling() {
+            if (pipelinePollingTimer) clearInterval(pipelinePollingTimer);
+            pipelinePollingTimer = setInterval(() => {
+                const modal = document.getElementById('adminModal');
+                if (modal && !modal.classList.contains('hidden')) {
+                    refreshPipelineStatus();
+                } else {
+                    stopPipelinePolling();
+                }
+            }, 4000);
+        }
+
+        function stopPipelinePolling() {
+            if (pipelinePollingTimer) {
+                clearInterval(pipelinePollingTimer);
+                pipelinePollingTimer = null;
+            }
+        }
+
+        function uploadPipelineSlot(slotName, inputId) {
             const input = document.getElementById(inputId);
             if (!input || !input.files || input.files.length === 0) return;
+            const progressMap = {
+                'covers': 'pipeProgressSlot1',
+                'contents': 'pipeProgressSlot2',
+                'ends': 'pipeProgressSlot3'
+            };
+            uploadPipelineFiles(slotName, Array.from(input.files), progressMap[slotName] || '', inputId);
+        }
 
-            const files = Array.from(input.files);
-            const total = files.length;
+        async function uploadPipelineFiles(slotName, files, progressId, inputId) {
+            if (!files || files.length === 0) return;
+            const validFiles = Array.from(files).filter(f => f.type.startsWith('image/') || f.type.startsWith('video/') || /\.(png|jpe?g|webp|gif|bmp|heic|mov|mp4)$/i.test(f.name));
+            if (validFiles.length === 0) {
+                showToast('⚠️ 未检测到有效的图片或视频文件');
+                return;
+            }
 
-            showToast('🚀 开始原画无损流式入池：共 ' + total + ' 个文件，保持 100% 原始画质...');
+            const total = validFiles.length;
+            const progressEl = progressId ? document.getElementById(progressId) : null;
+            if (progressEl) {
+                progressEl.classList.remove('hidden');
+                progressEl.innerHTML = `
+                    <div class="flex items-center justify-between font-bold text-[11px] mb-1">
+                        <span class="text-slate-700">⏳ 正在无损入池 (100% 原画)...</span>
+                        <span id="${progressId}-text" class="text-indigo-600 font-mono">0 / ${total}</span>
+                    </div>
+                    <div class="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+                        <div id="${progressId}-bar" class="bg-indigo-600 h-full rounded-full transition-all duration-150" style="width: 0%"></div>
+                    </div>
+                `;
+            }
+
+            showToast('🚀 开始原画无损入池：共 ' + total + ' 个文件，100% 原始画质...');
 
             let successCount = 0;
+            let assembledTotal = 0;
             for (let i = 0; i < total; i++) {
-                const file = files[i];
-                showToast('⏳ 正在无损入池第 ' + (i + 1) + ' / ' + total + ' 张【100% 原画】...');
+                const file = validFiles[i];
+                const pct = Math.round(((i + 1) / total) * 100);
+                if (progressEl) {
+                    const bar = document.getElementById(`${progressId}-bar`);
+                    const txt = document.getElementById(`${progressId}-text`);
+                    if (bar) bar.style.width = pct + '%';
+                    if (txt) txt.innerText = `${i + 1} / ${total} (${pct}%)`;
+                }
 
                 try {
                     const b64 = await fileToBase64(file);
@@ -2845,8 +2913,8 @@ INDEX_HTML = """
                     const data = await res.json();
                     if (data.success) {
                         successCount++;
+                        if (data.assembled) assembledTotal += data.assembled;
                         refreshPipelineStatus();
-                        loadAdminData();
                     } else {
                         showToast('⚠️ 第 ' + (i + 1) + ' 张入池受阻: ' + (data.error || ''));
                     }
@@ -2855,10 +2923,61 @@ INDEX_HTML = """
                 }
             }
 
-            input.value = '';
+            if (inputId) {
+                const input = document.getElementById(inputId);
+                if (input) input.value = '';
+            }
+
+            if (progressEl) {
+                progressEl.innerHTML = `
+                    <div class="text-[11px] font-bold text-emerald-700 flex items-center justify-between">
+                        <span>🎉 全部完成！已无损入池 ${successCount} 张</span>
+                        ${assembledTotal > 0 ? `<span class="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded text-[10px]">✨ 自动合成 ${assembledTotal} 篇新作品</span>` : ''}
+                    </div>
+                `;
+                setTimeout(() => {
+                    progressEl.classList.add('hidden');
+                }, 4500);
+            }
+
             refreshPipelineStatus();
             loadAdminData();
-            showToast('🎉 全部完成！共 ' + successCount + ' / ' + total + ' 张 100% 原画已无损入池并组装！');
+            showToast(`🎉 入池完成！共 ${successCount} 张 100% 原画已无损进入缓冲池${assembledTotal > 0 ? `，并自动拼装生成 ${assembledTotal} 篇新笔记！` : ''}`);
+        }
+
+        function setupPipelineDropZone(zoneId, slotName, inputId, progressId) {
+            const zone = document.getElementById(zoneId);
+            if (!zone) return;
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                zone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    zone.classList.add('ring-2', 'ring-indigo-500', 'bg-indigo-50/50', 'border-indigo-500');
+                }, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    zone.classList.remove('ring-2', 'ring-indigo-500', 'bg-indigo-50/50', 'border-indigo-500');
+                }, false);
+            });
+
+            zone.addEventListener('drop', (e) => {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files && files.length > 0) {
+                    uploadPipelineFiles(slotName, Array.from(files), progressId, inputId);
+                }
+            }, false);
+        }
+
+        function setupPipelineDropZones() {
+            setupPipelineDropZone('dropZoneSlot1', 'covers', 'pipeSlot1', 'pipeProgressSlot1');
+            setupPipelineDropZone('dropZoneSlot2', 'contents', 'pipeSlot2', 'pipeProgressSlot2');
+            setupPipelineDropZone('dropZoneSlot3', 'ends', 'pipeSlot3', 'pipeProgressSlot3');
         }
 
         async function readTextFile(file) {
