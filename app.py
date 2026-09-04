@@ -2305,13 +2305,13 @@ INDEX_HTML = """
                         <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-100 text-[11px]">
                             <div class="flex items-center gap-1.5 flex-wrap">
                                 <span class="text-slate-400 font-medium">快捷筛选:</span>
-                                <button onclick="setFilterSettlePreset('ready_24h')" class="px-2 py-0.5 rounded bg-purple-100 hover:bg-purple-200 text-purple-800 font-bold transition shadow-xs">💰 满24H待结</button>
-                                <button onclick="setFilterSettlePreset('under_24h')" class="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold transition shadow-xs">⏳ 24H观察中</button>
+                                <button id="btnSettleReady" onclick="setFilterSettlePreset('ready_24h')" class="px-2 py-0.5 rounded bg-purple-100 hover:bg-purple-200 text-purple-800 font-bold transition shadow-xs">💰 满24H待结</button>
+                                <button id="btnSettleUnder" onclick="setFilterSettlePreset('under_24h')" class="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold transition shadow-xs">⏳ 24H观察中</button>
                                 <span class="text-slate-300">|</span>
-                                <button onclick="setFilterDatePreset('all')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">全部日期</button>
-                                <button onclick="setFilterDatePreset('today')" class="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold transition">今天</button>
-                                <button onclick="setFilterDatePreset('yesterday')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">昨天</button>
-                                <button onclick="setFilterDatePreset('7days')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">近7天</button>
+                                <button id="btnDateAll" onclick="setFilterDatePreset('all')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">全部日期</button>
+                                <button id="btnDateToday" onclick="setFilterDatePreset('today')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">今天</button>
+                                <button id="btnDateYesterday" onclick="setFilterDatePreset('yesterday')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">昨天</button>
+                                <button id="btnDate7days" onclick="setFilterDatePreset('7days')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">近7天</button>
                             </div>
                             <div class="flex items-center gap-2">
                                 <span id="filterResultCountBadge" class="text-blue-700 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-100">共 0 条打卡</span>
@@ -3836,7 +3836,11 @@ INDEX_HTML = """
         function setFilterSettlePreset(preset) {
             const sSelect = document.getElementById('filterSettleSelect');
             if (sSelect) {
-                sSelect.value = preset;
+                if (sSelect.value === preset) {
+                    sSelect.value = '';
+                } else {
+                    sSelect.value = preset;
+                }
                 applySubmissionsFilter();
             }
         }
@@ -3870,6 +3874,41 @@ INDEX_HTML = """
             applySubmissionsFilter();
         }
 
+        function updateFilterPresetStyles(activeDatePreset, activeSettlePreset) {
+            const dateButtons = {
+                'all': document.getElementById('btnDateAll'),
+                'today': document.getElementById('btnDateToday'),
+                'yesterday': document.getElementById('btnDateYesterday'),
+                '7days': document.getElementById('btnDate7days')
+            };
+
+            Object.entries(dateButtons).forEach(([key, btn]) => {
+                if (!btn) return;
+                if (key === activeDatePreset) {
+                    btn.className = 'px-2 py-0.5 rounded bg-blue-600 text-white font-bold transition shadow-xs ring-2 ring-blue-300';
+                } else {
+                    btn.className = 'px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition';
+                }
+            });
+
+            const btnSettleReady = document.getElementById('btnSettleReady');
+            const btnSettleUnder = document.getElementById('btnSettleUnder');
+            if (btnSettleReady) {
+                if (activeSettlePreset === 'ready_24h') {
+                    btnSettleReady.className = 'px-2 py-0.5 rounded bg-purple-600 text-white font-bold transition shadow-xs ring-2 ring-purple-300';
+                } else {
+                    btnSettleReady.className = 'px-2 py-0.5 rounded bg-purple-100 hover:bg-purple-200 text-purple-800 font-bold transition shadow-xs';
+                }
+            }
+            if (btnSettleUnder) {
+                if (activeSettlePreset === 'under_24h') {
+                    btnSettleUnder.className = 'px-2 py-0.5 rounded bg-amber-500 text-white font-bold transition shadow-xs ring-2 ring-amber-300';
+                } else {
+                    btnSettleUnder.className = 'px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold transition shadow-xs';
+                }
+            }
+        }
+
         function resetSubmissionsFilter() {
             const wSelect = document.getElementById('filterWorkerSelect');
             const dInput = document.getElementById('filterDateInput');
@@ -3891,6 +3930,30 @@ INDEX_HTML = """
             const countBadge = document.getElementById('filterResultCountBadge');
             
             const now = new Date();
+            const formatDate = (d) => {
+                const year = d.getFullYear();
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+            const todayStr = formatDate(now);
+            const yest = new Date(now);
+            yest.setDate(yest.getDate() - 1);
+            const yestStr = formatDate(yest);
+
+            let activeDatePreset = '';
+            if (presetVal === '7days') {
+                activeDatePreset = '7days';
+            } else if (dateVal === todayStr) {
+                activeDatePreset = 'today';
+            } else if (dateVal === yestStr) {
+                activeDatePreset = 'yesterday';
+            } else if (!dateVal && !presetVal) {
+                activeDatePreset = 'all';
+            }
+
+            updateFilterPresetStyles(activeDatePreset, settle);
+
             const sevenDaysAgo = new Date(now);
             sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
             const year = sevenDaysAgo.getFullYear();
