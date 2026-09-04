@@ -2792,38 +2792,63 @@ INDEX_HTML = """
             const input = document.getElementById(inputId);
             if (!input || !input.files || input.files.length === 0) return;
 
-            const files = input.files;
-            showToast('正在将 ' + files.length + ' 个文件送入缓冲池...');
+            const files = Array.from(input.files);
+            const total = files.length;
+            const BATCH_SIZE = 3;
 
-            const base64List = [];
-            for (let i = 0; i < files.length; i++) {
-                base64List.push(await fileToBase64(files[i]));
-            }
+            showToast('🚀 开始自动分批入池：共 ' + total + ' 个文件，每次 3 张自动推进...');
 
-            try {
-                const res = await fetch('/api/admin/pipeline/push', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Admin-Password': adminAuthToken
-                    },
-                    body: JSON.stringify({
-                        slot: slotName,
-                        items: base64List
-                    })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    showToast(data.message);
-                    input.value = '';
-                    refreshPipelineStatus();
-                    loadAdminData();
-                } else {
-                    showToast(data.error || '入池失败');
+            let successCount = 0;
+            for (let i = 0; i < total; i += BATCH_SIZE) {
+                const chunk = files.slice(i, i + BATCH_SIZE);
+                const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+                const totalBatches = Math.ceil(total / BATCH_SIZE);
+                const startIdx = i + 1;
+                const endIdx = Math.min(i + BATCH_SIZE, total);
+
+                showToast('⏳ 正在入池第 ' + batchNum + '/' + totalBatches + ' 批 (第 ' + startIdx + '~' + endIdx + ' 张)...');
+
+                const base64List = [];
+                for (const f of chunk) {
+                    try {
+                        const b64 = await fileToBase64(f);
+                        if (b64) base64List.push(b64);
+                    } catch (e) {
+                        console.error('File read error', e);
+                    }
                 }
-            } catch (err) {
-                showToast('上传入池失败');
+
+                if (base64List.length === 0) continue;
+
+                try {
+                    const res = await fetch('/api/admin/pipeline/push', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Admin-Password': adminAuthToken
+                        },
+                        body: JSON.stringify({
+                            slot: slotName,
+                            items: base64List
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        successCount += base64List.length;
+                        refreshPipelineStatus();
+                        loadAdminData();
+                    } else {
+                        showToast('⚠️ 第 ' + batchNum + ' 批入池失败: ' + (data.error || ''));
+                    }
+                } catch (err) {
+                    showToast('⚠️ 第 ' + batchNum + ' 批网络连接异常');
+                }
             }
+
+            input.value = '';
+            refreshPipelineStatus();
+            loadAdminData();
+            showToast('🎉 全部完成！共 ' + successCount + '/' + total + ' 个文件已安全分批送入缓冲池！');
         }
 
         async function readTextFile(file) {
@@ -3409,9 +3434,47 @@ INDEX_HTML = """
 
         async function fileToBase64(file) {
             if (!file) return '';
+            if (!file.type || !file.type.startsWith('image/')) {
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(file);
+                });
+            }
             return new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onload = (e) => resolve(e.target.result);
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const maxDim = 1440;
+                        let w = img.width;
+                        let h = img.height;
+                        if (w > maxDim || h > maxDim) {
+                            if (w > h) {
+                                h = Math.round((h * maxDim) / w);
+                                w = maxDim;
+                            } else {
+                                w = Math.round((w * maxDim) / h);
+                                h = maxDim;
+                            }
+                        }
+                        const canvas = document.createElement('canvas');
+                        canvas.width = w;
+                        canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, w, h);
+                        try {
+                            const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+                            resolve(dataUrl);
+                        } catch (err) {
+                            resolve(e.target.result);
+                        }
+                    };
+                    img.onerror = function() {
+                        resolve(e.target.result);
+                    };
+                    img.src = e.target.result;
+                };
                 reader.readAsDataURL(file);
             });
         }
