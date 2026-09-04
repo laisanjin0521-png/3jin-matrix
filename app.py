@@ -222,6 +222,15 @@ def init_db():
         value TEXT
     )
     """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pipeline_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slot TEXT,
+        content TEXT,
+        created_at TEXT
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_queue_slot ON pipeline_queue(slot)")
     
     # Safe column migration
     cursor.execute("PRAGMA table_info(submissions)")
@@ -1207,40 +1216,47 @@ def admin_batch_add():
     conn.close()
     return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品！'})
 
+def get_pipeline_counts():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT slot, count(*) FROM pipeline_queue GROUP BY slot")
+    rows = cursor.fetchall()
+    conn.close()
+    counts = {'covers': 0, 'contents': 0, 'ends': 0, 'copies': 0}
+    for r in rows:
+        slot = r[0]
+        cnt = r[1]
+        if slot in counts:
+            counts[slot] = int(cnt)
+    return counts
+
 def get_pipeline_queues():
-    try:
-        covers = json.loads(get_setting('buffer_covers', '[]'))
-    except Exception:
-        covers = []
-    try:
-        contents = json.loads(get_setting('buffer_contents', '[]'))
-    except Exception:
-        contents = []
-    try:
-        ends = json.loads(get_setting('buffer_ends', '[]'))
-    except Exception:
-        ends = []
-    try:
-        copies = json.loads(get_setting('buffer_copies', '[]'))
-    except Exception:
-        copies = []
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT slot, content FROM pipeline_queue ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    covers, contents, ends, copies = [], [], [], []
+    for r in rows:
+        s, c = r[0], r[1]
+        if s == 'covers': covers.append(c)
+        elif s == 'contents': contents.append(c)
+        elif s == 'ends': ends.append(c)
+        elif s == 'copies': copies.append(c)
     return covers, contents, ends, copies
 
 def save_pipeline_queues(covers, contents, ends, copies):
-    set_setting('buffer_covers', json.dumps(covers, ensure_ascii=False))
-    set_setting('buffer_contents', json.dumps(contents, ensure_ascii=False))
-    set_setting('buffer_ends', json.dumps(ends, ensure_ascii=False))
-    set_setting('buffer_copies', json.dumps(copies, ensure_ascii=False))
+    pass
 
 def trigger_pipeline_auto_assembly(prefix='装配作品_'):
-    covers, contents, ends, copies = get_pipeline_queues()
-    assemble_count = min(len(covers), len(contents), len(ends), len(copies))
+    counts = get_pipeline_counts()
+    assemble_count = min(counts['covers'], counts['contents'], counts['ends'], counts['copies'])
     if assemble_count <= 0:
         return 0, {
-            'covers': len(covers),
-            'contents': len(contents),
-            'ends': len(ends),
-            'copies': len(copies),
+            'covers': counts['covers'],
+            'contents': counts['contents'],
+            'ends': counts['ends'],
+            'copies': counts['copies'],
             'can_assemble': False
         }
 
@@ -1249,11 +1265,24 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
     now_dt = get_beijing_now()
     time_tag = now_dt.strftime('%m%d_%H%M%S')
 
+    assembled_actual = 0
     for i in range(assemble_count):
-        cover = covers.pop(0)
-        content = contents.pop(0)
-        end = ends.pop(0)
-        copy_text = copies.pop(0)
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'covers' ORDER BY id ASC LIMIT 1")
+        c_row = cursor.fetchone()
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'contents' ORDER BY id ASC LIMIT 1")
+        cnt_row = cursor.fetchone()
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'ends' ORDER BY id ASC LIMIT 1")
+        e_row = cursor.fetchone()
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'copies' ORDER BY id ASC LIMIT 1")
+        cp_row = cursor.fetchone()
+
+        if not (c_row and cnt_row and e_row and cp_row):
+            break
+
+        cover_id, cover = c_row[0], c_row[1]
+        content_id, content = cnt_row[0], cnt_row[1]
+        end_id, end = e_row[0], e_row[1]
+        copy_id, copy_text = cp_row[0], cp_row[1]
 
         group_name = f"{prefix}{time_tag}_{i+1:02d}"
         first_line = copy_text.split('\n')[0].strip() if copy_text else ''
@@ -1267,15 +1296,18 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
         VALUES (?, ?, 'pipeline_assembled', ?, ?, ?, 'available', ?)
         """, (group_name, title, images_json, copy_text, last_tag, now_str))
 
+        cursor.execute("DELETE FROM pipeline_queue WHERE id IN (?, ?, ?, ?)", (cover_id, content_id, end_id, copy_id))
+        assembled_actual += 1
+
     conn.commit()
     conn.close()
 
-    save_pipeline_queues(covers, contents, ends, copies)
-    return assemble_count, {
-        'covers': len(covers),
-        'contents': len(contents),
-        'ends': len(ends),
-        'copies': len(copies),
+    new_counts = get_pipeline_counts()
+    return assembled_actual, {
+        'covers': new_counts['covers'],
+        'contents': new_counts['contents'],
+        'ends': new_counts['ends'],
+        'copies': new_counts['copies'],
         'can_assemble': False
     }
 
@@ -1286,16 +1318,11 @@ def admin_pipeline_status():
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     
-    covers, contents, ends, copies = get_pipeline_queues()
-    min_count = min(len(covers), len(contents), len(ends), len(copies))
+    counts = get_pipeline_counts()
+    min_count = min(counts['covers'], counts['contents'], counts['ends'], counts['copies'])
     return jsonify({
         'success': True,
-        'counts': {
-            'covers': len(covers),
-            'contents': len(contents),
-            'ends': len(ends),
-            'copies': len(copies)
-        },
+        'counts': counts,
         'can_assemble': min_count >= 1,
         'min_count': min_count
     })
@@ -1315,30 +1342,26 @@ def admin_pipeline_push():
     if not slot or not items:
         return jsonify({'success': False, 'error': '缺少入池数据！'}), 400
 
-    covers, contents, ends, copies = get_pipeline_queues()
-    if slot == 'covers':
-        covers.extend(items)
-    elif slot == 'contents':
-        contents.extend(items)
-    elif slot == 'ends':
-        ends.extend(items)
-    elif slot == 'copies':
-        copies.extend(items)
-    else:
+    if slot not in ['covers', 'contents', 'ends', 'copies']:
         return jsonify({'success': False, 'error': '无效的槽位名称'}), 400
 
-    save_pipeline_queues(covers, contents, ends, copies)
+    conn = get_db()
+    cursor = conn.cursor()
+    now_str = get_beijing_now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for it in items:
+        cursor.execute("INSERT INTO pipeline_queue (slot, content, created_at) VALUES (?, ?, ?)", (slot, it, now_str))
+
+    conn.commit()
+    conn.close()
+
     assembled, status = trigger_pipeline_auto_assembly(prefix)
+    counts = get_pipeline_counts()
     
     return jsonify({
         'success': True,
         'assembled': assembled,
-        'counts': {
-            'covers': len(covers),
-            'contents': len(contents),
-            'ends': len(ends),
-            'copies': len(copies)
-        },
+        'counts': counts,
         'message': f'🎉 成功入池 {len(items)} 项！' + (f' ⚡️ 满足 3 图+文案条件，已自动拼装并入库 {assembled} 组新作品！' if assembled > 0 else '')
     })
 
@@ -1351,12 +1374,14 @@ def admin_pipeline_clear():
 
     data = request.json or {}
     slot = data.get('slot', 'all')
-    covers, contents, ends, copies = get_pipeline_queues()
-    if slot == 'covers' or slot == 'all': covers = []
-    if slot == 'contents' or slot == 'all': contents = []
-    if slot == 'ends' or slot == 'all': ends = []
-    if slot == 'copies' or slot == 'all': copies = []
-    save_pipeline_queues(covers, contents, ends, copies)
+    conn = get_db()
+    cursor = conn.cursor()
+    if slot == 'all':
+        cursor.execute("DELETE FROM pipeline_queue")
+    elif slot in ['covers', 'contents', 'ends', 'copies']:
+        cursor.execute("DELETE FROM pipeline_queue WHERE slot = ?", (slot,))
+    conn.commit()
+    conn.close()
     return jsonify({'success': True, 'message': '已清空对应缓冲箱'})
 
 @app.route('/api/admin/materials/delete', methods=['POST'])
@@ -2794,33 +2819,18 @@ INDEX_HTML = """
 
             const files = Array.from(input.files);
             const total = files.length;
-            const BATCH_SIZE = 3;
 
-            showToast('🚀 开始自动分批入池：共 ' + total + ' 个文件，每次 3 张自动推进...');
+            showToast('🚀 开始原画无损流式入池：共 ' + total + ' 个文件，保持 100% 原始画质...');
 
             let successCount = 0;
-            for (let i = 0; i < total; i += BATCH_SIZE) {
-                const chunk = files.slice(i, i + BATCH_SIZE);
-                const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-                const totalBatches = Math.ceil(total / BATCH_SIZE);
-                const startIdx = i + 1;
-                const endIdx = Math.min(i + BATCH_SIZE, total);
-
-                showToast('⏳ 正在入池第 ' + batchNum + '/' + totalBatches + ' 批 (第 ' + startIdx + '~' + endIdx + ' 张)...');
-
-                const base64List = [];
-                for (const f of chunk) {
-                    try {
-                        const b64 = await fileToBase64(f);
-                        if (b64) base64List.push(b64);
-                    } catch (e) {
-                        console.error('File read error', e);
-                    }
-                }
-
-                if (base64List.length === 0) continue;
+            for (let i = 0; i < total; i++) {
+                const file = files[i];
+                showToast('⏳ 正在无损入池第 ' + (i + 1) + ' / ' + total + ' 张【100% 原画】...');
 
                 try {
+                    const b64 = await fileToBase64(file);
+                    if (!b64) continue;
+
                     const res = await fetch('/api/admin/pipeline/push', {
                         method: 'POST',
                         headers: {
@@ -2829,26 +2839,26 @@ INDEX_HTML = """
                         },
                         body: JSON.stringify({
                             slot: slotName,
-                            items: base64List
+                            items: [b64]
                         })
                     });
                     const data = await res.json();
                     if (data.success) {
-                        successCount += base64List.length;
+                        successCount++;
                         refreshPipelineStatus();
                         loadAdminData();
                     } else {
-                        showToast('⚠️ 第 ' + batchNum + ' 批入池失败: ' + (data.error || ''));
+                        showToast('⚠️ 第 ' + (i + 1) + ' 张入池受阻: ' + (data.error || ''));
                     }
                 } catch (err) {
-                    showToast('⚠️ 第 ' + batchNum + ' 批网络连接异常');
+                    showToast('⚠️ 第 ' + (i + 1) + ' 张网络波动');
                 }
             }
 
             input.value = '';
             refreshPipelineStatus();
             loadAdminData();
-            showToast('🎉 全部完成！共 ' + successCount + '/' + total + ' 个文件已安全分批送入缓冲池！');
+            showToast('🎉 全部完成！共 ' + successCount + ' / ' + total + ' 张 100% 原画已无损入池并组装！');
         }
 
         async function readTextFile(file) {
@@ -3434,47 +3444,10 @@ INDEX_HTML = """
 
         async function fileToBase64(file) {
             if (!file) return '';
-            if (!file.type || !file.type.startsWith('image/')) {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.readAsDataURL(file);
-                });
-            }
             return new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        const maxDim = 1440;
-                        let w = img.width;
-                        let h = img.height;
-                        if (w > maxDim || h > maxDim) {
-                            if (w > h) {
-                                h = Math.round((h * maxDim) / w);
-                                w = maxDim;
-                            } else {
-                                w = Math.round((w * maxDim) / h);
-                                h = maxDim;
-                            }
-                        }
-                        const canvas = document.createElement('canvas');
-                        canvas.width = w;
-                        canvas.height = h;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, w, h);
-                        try {
-                            const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-                            resolve(dataUrl);
-                        } catch (err) {
-                            resolve(e.target.result);
-                        }
-                    };
-                    img.onerror = function() {
-                        resolve(e.target.result);
-                    };
-                    img.src = e.target.result;
-                };
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = (e) => resolve('');
                 reader.readAsDataURL(file);
             });
         }
