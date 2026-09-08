@@ -1,0 +1,5 @@
+.DS_Store
+.thumbs_cache/
+*.db-shm
+*.db-wal
+__pycache__/

@@ -161,12 +161,9 @@ class TursoConn:
         pass
 
 def get_db():
-    if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
-        try:
-            return TursoConn()
-        except Exception:
-            pass
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -328,15 +325,15 @@ def auto_inspect_all_submissions_silent():
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, xhs_link, survival_status FROM submissions WHERE survival_status IN ('pending', 'in_review') ORDER BY id DESC LIMIT 30")
-        rows = cursor.fetchall()
+        cursor.execute("SELECT id, xhs_link, survival_status FROM submissions WHERE survival_status IN ('pending', 'in_review') ORDER BY id DESC LIMIT 20")
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
         if not rows:
-            conn.close()
             return 0
             
         now_str = get_beijing_now_str()
         headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'}
-        updated_count = 0
+        updates = []
         
         for r in rows:
             url = r['xhs_link']
@@ -360,12 +357,15 @@ def auto_inspect_all_submissions_silent():
                 pass
                 
             if survival != r['survival_status']:
-                cursor.execute("UPDATE submissions SET survival_status = ?, last_inspected_at = ? WHERE id = ?", (survival, now_str, r['id']))
-                updated_count += 1
+                updates.append((survival, now_str, r['id']))
                 
-        conn.commit()
-        conn.close()
-        return updated_count
+        if updates:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.executemany("UPDATE submissions SET survival_status = ?, last_inspected_at = ? WHERE id = ?", updates)
+            conn.commit()
+            conn.close()
+        return len(updates)
     except Exception:
         return 0
 
@@ -847,18 +847,29 @@ def claim_material():
     conn.close()
     
     last_tag = next_mat['last_tag'] or extract_last_tag(next_mat['copy_text'])
+    mat_data = {
+        'id': next_mat['id'],
+        'group_name': next_mat['group_name'],
+        'title': next_mat['title'],
+        'images': json.loads(next_mat['images_json']),
+        'copy_text': next_mat['copy_text'],
+        'last_tag': last_tag,
+        'assigned_at': now_str
+    }
     
     return jsonify({
         'success': True,
         'message': f'恭喜领取成功！已为你分配：【{next_mat["group_name"]}】（今日第 {today_submitted + 1}/{daily_limit} 组）',
-        'material': {
-            'id': next_mat['id'],
-            'group_name': next_mat['group_name'],
-            'title': next_mat['title'],
-            'images': json.loads(next_mat['images_json']),
-            'copy_text': next_mat['copy_text'],
-            'last_tag': last_tag,
-            'assigned_at': now_str
+        'material': mat_data,
+        'user': {
+            'name': user_name,
+            'completed_count': user['completed_count'] if user else 0,
+            'today_count': today_submitted,
+            'daily_limit': daily_limit,
+            'current_material': mat_data,
+            'in_cooldown': False,
+            'cooldown_remaining_seconds': 0,
+            'cooldown_minutes': cooldown_min
         }
     })
 
@@ -1564,11 +1575,12 @@ INDEX_HTML = """
                 <div class="flex items-center space-x-2">
                     <input type="text" id="userNameInput" placeholder="请输入你的姓名 / 微信昵称 (如: 皮皮 / 三金)" 
                         class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition"
-                        oninput="saveCredentials()" onkeydown="if(event.key==='Enter') checkUserStatus()">
-                    <button onclick="checkUserStatus()" class="shrink-0 px-4 py-2 text-xs bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold transition shadow-sm">
-                        🔐 验证并同步
+                        oninput="onNameInputDebounce()" onchange="checkUserStatus()" onkeydown="if(event.key==='Enter') checkUserStatus()">
+                    <button onclick="checkUserStatus()" id="syncUserBtn" class="shrink-0 px-4 py-2 text-xs bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold transition shadow-sm flex items-center space-x-1">
+                        <span>🔐 验证并同步</span>
                     </button>
                 </div>
+                <p class="text-[10px] text-slate-400 mt-1">💡 提示：输入姓名后也可直接点击下方【领取第 1 组独家素材】，系统将自动秒级验证发放</p>
             </div>
         </div>
 
@@ -1584,7 +1596,7 @@ INDEX_HTML = """
                 <div class="p-3 bg-amber-50 rounded-xl border border-amber-200/60 text-xs text-amber-800 leading-relaxed">
                     📌 <strong>领料说明</strong>：输入姓名后，点击下方按钮即可领取专属独家发布素材（每组素材独家派发，不重复使用）！
                 </div>
-                <button onclick="claimMaterial(false)" class="w-full py-3.5 xhs-gradient hover:opacity-95 text-white rounded-xl font-bold text-sm shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2">
+                <button onclick="claimMaterial(false)" id="claimFirstBtn" class="w-full py-3.5 xhs-gradient hover:opacity-95 text-white rounded-xl font-bold text-sm shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2">
                     <span>🎁 领取第 1 组独家素材</span>
                 </button>
             </div>
@@ -2391,25 +2403,53 @@ INDEX_HTML = """
             }, 3500);
         }
 
-        async function checkUserStatus() {
+        let isCheckingStatus = false;
+        let nameDebounceTimer = null;
+
+        function onNameInputDebounce() {
+            saveCredentials();
+            if (nameDebounceTimer) clearTimeout(nameDebounceTimer);
+            nameDebounceTimer = setTimeout(() => {
+                const nameEl = document.getElementById('userNameInput');
+                if (nameEl && nameEl.value.trim().length >= 1) {
+                    checkUserStatus(true);
+                }
+            }, 600);
+        }
+
+        async function checkUserStatus(silent = false) {
+            if (isCheckingStatus) return;
             const nameEl = document.getElementById('userNameInput');
             const name = nameEl ? nameEl.value.trim() : '';
             if (!name) {
-                showToast('请先输入你的姓名或微信昵称');
+                if (!silent) showToast('请先输入你的姓名或微信昵称');
                 return;
             }
             saveCredentials();
+
+            const syncBtn = document.getElementById('syncUserBtn');
+            if (syncBtn && !silent) {
+                syncBtn.innerHTML = '<span>⏳ 验证中...</span>';
+                syncBtn.disabled = true;
+            }
+            isCheckingStatus = true;
 
             try {
                 const res = await fetch(`/api/user/status?name=${encodeURIComponent(name)}`);
                 const data = await res.json();
                 if (data.success) {
                     renderUserState(data.user);
-                } else {
+                } else if (!silent) {
                     showToast(data.error);
                 }
             } catch (err) {
-                showToast('网络连接失败');
+                if (!silent) showToast('网络连接失败');
+            } finally {
+                if (syncBtn && !silent) {
+                    syncBtn.innerHTML = '<span>🔐 验证并同步</span>';
+                    syncBtn.disabled = false;
+                }
+                isCheckingStatus = false;
             }
         }
 
@@ -2589,10 +2629,14 @@ INDEX_HTML = """
                 }
             }
 
-            const btn = document.getElementById('claimBtn');
-            if (btn && isNext) {
-                btn.innerHTML = '<span>🔍 正在智能提取链接并核验...</span>';
-                btn.disabled = true;
+            const nextBtn = document.getElementById('claimBtn');
+            const firstBtn = document.getElementById('claimFirstBtn');
+            if (isNext && nextBtn) {
+                nextBtn.innerHTML = '<span>🔍 正在智能提取链接并核验...</span>';
+                nextBtn.disabled = true;
+            } else if (!isNext && firstBtn) {
+                firstBtn.innerHTML = '<span>⚡️ 正在极速领取第 1 组素材...</span>';
+                firstBtn.disabled = true;
             }
 
             try {
@@ -2623,9 +2667,12 @@ INDEX_HTML = """
             } catch (err) {
                 showToast('网络请求异常');
             } finally {
-                if (btn && isNext) {
-                    btn.innerHTML = '<span>🚀 提交小红书打卡链接</span>';
-                    btn.disabled = false;
+                if (isNext && nextBtn) {
+                    nextBtn.innerHTML = '<span>🚀 提交小红书打卡链接</span>';
+                    nextBtn.disabled = false;
+                } else if (!isNext && firstBtn) {
+                    firstBtn.innerHTML = '<span>🎁 领取第 1 组独家素材</span>';
+                    firstBtn.disabled = false;
                 }
             }
         }
