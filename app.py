@@ -243,9 +243,9 @@ def init_db():
             cursor.execute(f"ALTER TABLE submissions ADD COLUMN {c_name} {c_type}")
 
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode', '8888')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '060521')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', '968900')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_question', '3金的专属安全暗号是什么？')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_answer', '060521')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_security_answer', '968900')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auth_mode', 'whitelist')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('whitelist', '[]')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_limit', '3')")
@@ -885,7 +885,7 @@ def api_ping():
 def admin_login():
     data = request.json or {}
     pwd = data.get('password', '').strip()
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if pwd == real_pwd:
         return jsonify({'success': True, 'token': 'admin_authed'})
     return jsonify({'success': False, 'error': '管理密码错误！'})
@@ -893,7 +893,7 @@ def admin_login():
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def admin_settings():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权管理操作'}), 401
         
@@ -938,7 +938,7 @@ def admin_settings():
         'cooldown_minutes': get_setting('cooldown_minutes', '60'),
         'strict_tag_check': get_setting('strict_tag_check', '1') == '1',
         'auto_delete_consumed': get_setting('auto_delete_consumed', '0') == '1',
-        'admin_password': get_setting('admin_password', '060521'),
+        'admin_password': get_setting('admin_password', '968900'),
         'admin_security_question': get_setting('admin_security_question', '3金的专属安全暗号是什么？'),
         'whitelist': whitelist
     })
@@ -953,8 +953,8 @@ def get_admin_security_info():
 @app.route('/api/admin/change_password', methods=['POST'])
 def admin_change_password():
     admin_pwd = request.headers.get('X-Admin-Password', '').strip()
-    real_pwd = get_setting('admin_password', '060521').strip()
-    real_ans = get_setting('admin_security_answer', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
+    real_ans = get_setting('admin_security_answer', '968900').strip()
     data = request.json or {}
 
     old_pwd = data.get('old_password', '').strip()
@@ -991,7 +991,7 @@ def admin_reset_password():
     data = request.json or {}
     sec_ans = data.get('security_answer', '').strip()
     new_pwd = data.get('new_password', '').strip()
-    real_ans = get_setting('admin_security_answer', '060521').strip()
+    real_ans = get_setting('admin_security_answer', '968900').strip()
 
     if not sec_ans or sec_ans != real_ans:
         return jsonify({'success': False, 'error': '密保答案不正确，无法重置密码！'}), 403
@@ -1009,7 +1009,7 @@ def admin_reset_password():
 @app.route('/api/admin/whitelist/add', methods=['POST'])
 def admin_whitelist_add():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     data = request.json or {}
@@ -1029,7 +1029,7 @@ def admin_whitelist_add():
 @app.route('/api/admin/whitelist/remove', methods=['POST'])
 def admin_whitelist_remove():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     data = request.json or {}
@@ -1047,7 +1047,7 @@ def admin_whitelist_remove():
 @app.route('/api/admin/submissions/toggle_settlement', methods=['POST'])
 def admin_toggle_settlement():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
         
@@ -1070,7 +1070,7 @@ def admin_toggle_settlement():
 @app.route('/api/admin/submissions/inspect_survival', methods=['POST'])
 def admin_inspect_survival():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
         
@@ -1117,7 +1117,7 @@ def admin_inspect_survival():
 @app.route('/api/admin/materials/release_expired', methods=['POST'])
 def admin_release_expired():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     count = auto_release_expired_assignments()
@@ -1126,7 +1126,7 @@ def admin_release_expired():
 @app.route('/api/admin/materials/add', methods=['POST'])
 def admin_add_material():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
 
@@ -1177,7 +1177,7 @@ def admin_add_material():
 @app.route('/api/admin/materials/batch_add', methods=['POST'])
 def admin_batch_add():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
 
@@ -1325,7 +1325,7 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
 @app.route('/api/admin/pipeline/status', methods=['GET'])
 def admin_pipeline_status():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     
@@ -1341,7 +1341,7 @@ def admin_pipeline_status():
 @app.route('/api/admin/pipeline/push', methods=['POST'])
 def admin_pipeline_push():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
 
@@ -1379,7 +1379,7 @@ def admin_pipeline_push():
 @app.route('/api/admin/pipeline/clear', methods=['POST'])
 def admin_pipeline_clear():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
 
@@ -1398,7 +1398,7 @@ def admin_pipeline_clear():
 @app.route('/api/admin/materials/delete', methods=['POST'])
 def admin_delete_material():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     
@@ -1417,7 +1417,7 @@ def admin_delete_material():
 @app.route('/api/admin/materials/clear_completed', methods=['POST'])
 def admin_clear_completed():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
         
@@ -1433,7 +1433,7 @@ def admin_clear_completed():
 def admin_stats():
     auto_release_expired_assignments()
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '管理密码错误或未登录'}), 401
 
@@ -1484,7 +1484,7 @@ def admin_stats():
 @app.route('/api/admin/sync', methods=['POST'])
 def admin_sync():
     admin_pwd = request.headers.get('X-Admin-Password', '')
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权'}), 401
     count = scan_and_import_materials_from_folder()
@@ -1493,7 +1493,7 @@ def admin_sync():
 @app.route('/api/admin/export_csv', methods=['GET'])
 def export_csv():
     admin_pwd = request.args.get('token', request.headers.get('X-Admin-Password', '')).strip()
-    real_pwd = get_setting('admin_password', '060521').strip()
+    real_pwd = get_setting('admin_password', '968900').strip()
     if admin_pwd != real_pwd:
         return jsonify({'success': False, 'error': '未授权访问，请输入管理员密码'}), 401
 
