@@ -401,21 +401,36 @@ def check_worker_auth(user_name, passcode=''):
     real_passcode = get_setting('passcode', '8888').strip()
     whitelist_str = get_setting('whitelist', '[]')
     try:
-        whitelist = json.loads(whitelist_str)
-    except:
+        raw_list = json.loads(whitelist_str)
+        whitelist = [str(w).strip() for w in raw_list if str(w).strip()]
+    except Exception:
         whitelist = []
+
+    clean_name = user_name.strip() if user_name else ""
 
     if auth_mode == 'none':
         return True, ""
-    
-    if auth_mode in ('passcode', 'both'):
+
+    # Case-insensitive & trimmed matching
+    is_in_whitelist = any(clean_name.lower() == w.lower() for w in whitelist)
+
+    # If the user is in whitelist, ALWAYS authorize directly
+    if is_in_whitelist:
+        return True, ""
+
+    if auth_mode == 'whitelist':
+        if not clean_name:
+            return False, "请输入分发人员姓名！"
+        return False, f"⚠️ 未授权人员【{clean_name}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
+
+    if auth_mode == 'passcode':
         if not passcode or passcode.strip() != real_passcode:
-            return False, "领料口令错误！请向 3金 索取正确口令。"
-            
-    if auth_mode in ('whitelist', 'both'):
-        if not user_name or user_name.strip() not in whitelist:
-            return False, f"⚠️ 未授权的分发人员【{user_name or '匿名'}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
-            
+            return False, f"⚠️ 未授权人员【{clean_name or '匿名'}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
+        return True, ""
+
+    if auth_mode == 'both':
+        return False, f"⚠️ 未授权人员【{clean_name}】！你尚未在 3金 的兼职白名单中，请联系 3金 添加授权。"
+
     return True, ""
 
 def auto_detect_xhs_link_with_tag(url, expected_tag, expected_title):
