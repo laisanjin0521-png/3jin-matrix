@@ -1242,8 +1242,16 @@ def admin_batch_add():
     conn.close()
     return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品！'})
 
+def get_pipeline_db():
+    if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+        try:
+            return TursoConn()
+        except Exception:
+            pass
+    return get_db()
+
 def get_pipeline_counts():
-    conn = get_db()
+    conn = get_pipeline_db()
     cursor = conn.cursor()
     cursor.execute("SELECT slot, count(*) FROM pipeline_queue GROUP BY slot")
     rows = cursor.fetchall()
@@ -1257,7 +1265,7 @@ def get_pipeline_counts():
     return counts
 
 def get_pipeline_queues():
-    conn = get_db()
+    conn = get_pipeline_db()
     cursor = conn.cursor()
     cursor.execute("SELECT slot, content FROM pipeline_queue ORDER BY id ASC")
     rows = cursor.fetchall()
@@ -1286,7 +1294,7 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
             'can_assemble': False
         }
 
-    conn = get_db()
+    conn = get_pipeline_db()
     cursor = conn.cursor()
     now_dt = get_beijing_now()
     time_tag = now_dt.strftime('%m%d_%H%M%S')
@@ -1317,10 +1325,23 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
         images_json = json.dumps([cover, content, end], ensure_ascii=False)
         now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
 
+        # Insert into both pipeline DB and local worker claim DB
         cursor.execute("""
         INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
         VALUES (?, ?, 'pipeline_assembled', ?, ?, ?, 'available', ?)
         """, (group_name, title, images_json, copy_text, last_tag, now_str))
+
+        try:
+            local_conn = get_db()
+            local_cursor = local_conn.cursor()
+            local_cursor.execute("""
+            INSERT OR REPLACE INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+            VALUES (?, ?, 'pipeline_assembled', ?, ?, ?, 'available', ?)
+            """, (group_name, title, images_json, copy_text, last_tag, now_str))
+            local_conn.commit()
+            local_conn.close()
+        except Exception:
+            pass
 
         cursor.execute("DELETE FROM pipeline_queue WHERE id IN (?, ?, ?, ?)", (cover_id, content_id, end_id, copy_id))
         assembled_actual += 1
@@ -1371,7 +1392,7 @@ def admin_pipeline_push():
     if slot not in ['covers', 'contents', 'ends', 'copies']:
         return jsonify({'success': False, 'error': '无效的槽位名称'}), 400
 
-    conn = get_db()
+    conn = get_pipeline_db()
     cursor = conn.cursor()
     now_str = get_beijing_now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -1400,7 +1421,7 @@ def admin_pipeline_clear():
 
     data = request.json or {}
     slot = data.get('slot', 'all')
-    conn = get_db()
+    conn = get_pipeline_db()
     cursor = conn.cursor()
     if slot == 'all':
         cursor.execute("DELETE FROM pipeline_queue")
