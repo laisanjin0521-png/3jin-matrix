@@ -99,14 +99,22 @@ class TursoCursor:
             ]
         }
         
-        req = urllib.request.Request(
-            TURSO_DATABASE_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=10) as url_resp:
-            data = json.loads(url_resp.read().decode("utf-8"))
+        data = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(
+                    TURSO_DATABASE_URL,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=12) as url_resp:
+                    data = json.loads(url_resp.read().decode("utf-8"))
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5)
             
         res = data["results"][0]
         if res["type"] == "error":
@@ -254,11 +262,16 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('strict_tag_check', '0')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_delete_consumed', '0')")
     
+    cursor.execute("SELECT COUNT(*) FROM submissions")
+    sub_count = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     
     # Auto-sync cloud submissions & data from Turso
-    sync_turso_to_local_db()
+    if sub_count == 0:
+        sync_turso_to_local_db()
+    else:
+        threading.Thread(target=sync_turso_to_local_db, daemon=True).start()
 
 def sync_turso_to_local_db():
     if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
@@ -288,17 +301,19 @@ def sync_turso_to_local_db():
             VALUES (?, ?, ?)
             """, (u['name'], u['completed_count'], u['last_active']))
 
-        # 3. Sync materials from Turso cloud
-        try:
-            t_cur.execute("SELECT id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at FROM materials")
-            t_mats = t_cur.fetchall()
-            for m in t_mats:
-                cursor.execute("""
-                INSERT OR IGNORE INTO materials (id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (m['id'], m['group_name'], m.get('title'), m.get('folder_path'), m.get('images_json'), m.get('copy_text'), m.get('last_tag'), m.get('status', 'available'), m.get('assigned_to'), m.get('assigned_at'), m.get('created_at')))
-        except Exception:
-            pass
+        # 3. Sync materials from Turso cloud only if local materials is empty
+        cursor.execute("SELECT COUNT(*) FROM materials")
+        if cursor.fetchone()[0] == 0:
+            try:
+                t_cur.execute("SELECT id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at FROM materials")
+                t_mats = t_cur.fetchall()
+                for m in t_mats:
+                    cursor.execute("""
+                    INSERT OR IGNORE INTO materials (id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (m['id'], m['group_name'], m.get('title'), m.get('folder_path'), m.get('images_json'), m.get('copy_text'), m.get('last_tag'), m.get('status', 'available'), m.get('assigned_to'), m.get('assigned_at'), m.get('created_at')))
+            except Exception:
+                pass
 
         conn.commit()
         conn.close()
