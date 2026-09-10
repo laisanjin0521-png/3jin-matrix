@@ -256,6 +256,88 @@ def init_db():
     
     conn.commit()
     conn.close()
+    
+    # Auto-sync cloud submissions & data from Turso
+    sync_turso_to_local_db()
+
+def sync_turso_to_local_db():
+    if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
+        return
+    try:
+        t_conn = TursoConn()
+        t_cur = t_conn.cursor()
+        
+        # 1. Sync submissions from Turso cloud
+        t_cur.execute("SELECT id, user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, note, settlement_status, settled_at, last_inspected_at, survival_status FROM submissions")
+        t_subs = t_cur.fetchall()
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        for s in t_subs:
+            cursor.execute("""
+            INSERT OR REPLACE INTO submissions (id, user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, note, settlement_status, settled_at, last_inspected_at, survival_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (s['id'], s['user_name'], s['material_id'], s['material_name'], s['xhs_link'], s['xhs_title'], s['tag_expected'], s['tag_matched'], s['check_status'], s['submitted_at'], s['status'], s.get('note'), s.get('settlement_status', 'unsettled'), s.get('settled_at'), s.get('last_inspected_at'), s.get('survival_status', 'pending')))
+            
+        # 2. Sync users from Turso cloud
+        t_cur.execute("SELECT name, completed_count, last_active FROM users")
+        t_users = t_cur.fetchall()
+        for u in t_users:
+            cursor.execute("""
+            INSERT OR REPLACE INTO users (name, completed_count, last_active)
+            VALUES (?, ?, ?)
+            """, (u['name'], u['completed_count'], u['last_active']))
+
+        # 3. Sync materials from Turso cloud
+        try:
+            t_cur.execute("SELECT id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at FROM materials")
+            t_mats = t_cur.fetchall()
+            for m in t_mats:
+                cursor.execute("""
+                INSERT OR IGNORE INTO materials (id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (m['id'], m['group_name'], m.get('title'), m.get('folder_path'), m.get('images_json'), m.get('copy_text'), m.get('last_tag'), m.get('status', 'available'), m.get('assigned_to'), m.get('assigned_at'), m.get('created_at')))
+        except Exception:
+            pass
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("sync_turso_to_local_db error:", e)
+
+def async_save_submission_to_turso(sub_data, user_name=None, now_str=None):
+    def _save():
+        try:
+            t_conn = TursoConn()
+            t_cur = t_conn.cursor()
+            t_cur.execute("""
+            INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, settlement_status, survival_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, sub_data)
+            if user_name and now_str:
+                t_cur.execute("""
+                UPDATE users SET completed_count = completed_count + 1, current_material_id = NULL, last_active = ?
+                WHERE name = ?
+                """, (now_str, user_name))
+        except Exception as e:
+            print("async_save_submission_to_turso error:", e)
+    threading.Thread(target=_save, daemon=True).start()
+
+def async_update_settlement_turso(sub_id, new_status, settled_at):
+    def _update():
+        try:
+            t_conn = TursoConn()
+            t_cur = t_conn.cursor()
+            t_cur.execute("UPDATE submissions SET settlement_status = ?, settled_at = ? WHERE id = ?", (new_status, settled_at, sub_id))
+        except Exception as e:
+            print("async_update_settlement_turso error:", e)
+    threading.Thread(target=_update, daemon=True).start()
+
+# Auto-initialize database on module import
+try:
+    init_db()
+except Exception as _init_e:
+    print("Startup init_db error:", _init_e)
 
 _SETTINGS_CACHE = {}
 _SETTINGS_CACHE_TIME = 0
@@ -759,10 +841,17 @@ def claim_material():
                 conn.close()
                 return jsonify({'success': False, 'error': err_msg})
             
+            survival_stat = 'in_review' if check_status == 'in_review' else 'active'
             cursor.execute("""
             INSERT INTO submissions (user_name, material_id, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, status, settlement_status, survival_status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'unsettled', ?)
-            """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str, 'in_review' if check_status == 'in_review' else 'active'))
+            """, (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str, survival_stat))
+            
+            async_save_submission_to_turso(
+                (user_name, curr_mat['id'], curr_mat['group_name'], clean_url, xhs_title, expected_tag, 1 if matched else 0, check_status, now_str, 'verified', 'unsettled', survival_stat),
+                user_name=user_name,
+                now_str=now_str
+            )
             
             auto_delete = get_setting('auto_delete_consumed', '0') == '1'
             if auto_delete:
@@ -1073,13 +1162,16 @@ def admin_toggle_settlement():
         return jsonify({'success': False, 'error': 'Missing sub_id'})
         
     now_str = get_beijing_now_str()
+    settled_at = now_str if new_status == 'settled' else None
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
     UPDATE submissions SET settlement_status = ?, settled_at = ? WHERE id = ?
-    """, (new_status, now_str if new_status == 'settled' else None, sub_id))
+    """, (new_status, settled_at, sub_id))
     conn.commit()
     conn.close()
+    
+    async_update_settlement_turso(sub_id, new_status, settled_at)
     return jsonify({'success': True, 'settlement_status': new_status, 'message': f'状态已更新为【{"已结算" if new_status == "settled" else "未结算"}】'})
 
 @app.route('/api/admin/submissions/inspect_survival', methods=['POST'])
@@ -1475,6 +1567,16 @@ def admin_stats():
 
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM submissions')
+    total_submissions = cursor.fetchone()[0]
+    if total_submissions == 0:
+        conn.close()
+        sync_turso_to_local_db()
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM submissions')
+        total_submissions = cursor.fetchone()[0]
+
     cursor.execute('SELECT COUNT(*) FROM materials')
     total_materials = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM materials WHERE status = 'available'")
@@ -1483,8 +1585,6 @@ def admin_stats():
     assigned = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM materials WHERE status = 'completed'")
     completed = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM submissions')
-    total_submissions = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM submissions WHERE settlement_status = 'settled'")
     settled_submissions = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM users')
@@ -1535,6 +1635,13 @@ def export_csv():
 
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM submissions')
+    if cursor.fetchone()[0] == 0:
+        conn.close()
+        sync_turso_to_local_db()
+        conn = get_db()
+        cursor = conn.cursor()
+
     cursor.execute('SELECT id, user_name, material_name, xhs_link, xhs_title, tag_expected, tag_matched, check_status, submitted_at, settlement_status, settled_at, survival_status, last_inspected_at FROM submissions ORDER BY id DESC')
     rows = cursor.fetchall()
     conn.close()
