@@ -315,6 +315,17 @@ def sync_turso_to_local_db():
             except Exception:
                 pass
 
+        # 4. Sync settings from Turso cloud
+        try:
+            t_cur.execute("SELECT key, value FROM settings")
+            t_settings = t_cur.fetchall()
+            for s in t_settings:
+                if s['key'] == 'admin_password' and s['value'] != '968900':
+                    continue
+                cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (s['key'], s['value']))
+        except Exception:
+            pass
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -387,6 +398,16 @@ def set_setting(key, value):
     conn.close()
     if isinstance(_SETTINGS_CACHE, dict):
         _SETTINGS_CACHE[key] = str(value)
+        
+    if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+        def _sync_setting():
+            try:
+                t_conn = TursoConn()
+                t_cur = t_conn.cursor()
+                t_cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            except Exception:
+                pass
+        threading.Thread(target=_sync_setting, daemon=True).start()
 
 def auto_release_expired_assignments():
     try:
@@ -746,7 +767,7 @@ def get_user_status():
                 'assigned_at': mat['assigned_at']
             }
             
-    cursor.execute('SELECT * FROM submissions WHERE user_name = ? ORDER BY id DESC', (name,))
+    cursor.execute('SELECT * FROM submissions WHERE user_name = ? ORDER BY submitted_at DESC, id DESC', (name,))
     subs = [dict(row) for row in cursor.fetchall()]
     
     today_str = get_beijing_today_str()
@@ -915,7 +936,7 @@ def claim_material():
         
     # Check cooldown
     if cooldown_min > 0:
-        cursor.execute('SELECT submitted_at FROM submissions WHERE user_name = ? ORDER BY id DESC LIMIT 1', (user_name,))
+        cursor.execute('SELECT submitted_at FROM submissions WHERE user_name = ? ORDER BY submitted_at DESC, id DESC LIMIT 1', (user_name,))
         last_sub = cursor.fetchone()
         if last_sub:
             try:
@@ -2057,7 +2078,7 @@ INDEX_HTML = """
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                    <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 text-xs">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">1. 领料验证模式：</label>
                             <select id="settingAuthMode" onchange="saveAdminSettingsSilently()" class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
@@ -2069,22 +2090,28 @@ INDEX_HTML = """
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">2. 每日领料上限 (组)：</label>
-                            <input type="number" id="settingDailyLimit" step="1" min="1" max="100" placeholder="如: 3" 
+                            <label class="block font-semibold text-slate-700 mb-1">2. 每日上限 (组)：</label>
+                            <input type="number" id="settingDailyLimit" onchange="saveAdminSettingsSilently()" step="1" min="1" max="100" placeholder="如: 3" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">3. 超时退回 (小时)：</label>
-                            <input type="number" id="settingTimeoutHours" step="0.5" min="0.5" max="24" placeholder="如: 2" 
+                            <label class="block font-semibold text-slate-700 mb-1">3. 防限流冷却 (分钟)：</label>
+                            <input type="number" id="settingCooldown" onchange="saveAdminSettingsSilently()" step="5" min="0" max="360" placeholder="如: 60" 
                                 class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
                         </div>
 
                         <div>
-                            <label class="block font-semibold text-slate-700 mb-1">4. 🔐 密码与密保管理：</label>
+                            <label class="block font-semibold text-slate-700 mb-1">4. 超时退回 (小时)：</label>
+                            <input type="number" id="settingTimeoutHours" onchange="saveAdminSettingsSilently()" step="0.5" min="0.5" max="24" placeholder="如: 2" 
+                                class="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold text-amber-900 text-xs">
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-700 mb-1">5. 🔐 密码与密保：</label>
                             <button type="button" onclick="openAdminSecurityModal()" 
                                 class="w-full px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-sm">
-                                <span>🛡️ 修改密码 & 密保</span>
+                                <span>🛡️ 修改密码&密保</span>
                             </button>
                         </div>
                     </div>
@@ -3610,6 +3637,8 @@ INDEX_HTML = """
                     if (authModeEl) authModeEl.value = data.auth_mode || 'whitelist';
                     const dailyLimitEl = document.getElementById('settingDailyLimit');
                     if (dailyLimitEl) dailyLimitEl.value = data.daily_limit || 3;
+                    const cooldownEl = document.getElementById('settingCooldown');
+                    if (cooldownEl) cooldownEl.value = data.cooldown_minutes !== undefined ? data.cooldown_minutes : 60;
                     const timeoutEl = document.getElementById('settingTimeoutHours');
                     if (timeoutEl) timeoutEl.value = data.claim_timeout_hours || 2;
                     if (data.admin_security_question) {
@@ -3636,6 +3665,8 @@ INDEX_HTML = """
             const auth_mode = authModeEl ? authModeEl.value : 'whitelist';
             const dailyLimitEl = document.getElementById('settingDailyLimit');
             const daily_limit = dailyLimitEl ? dailyLimitEl.value.trim() : '3';
+            const cooldownEl = document.getElementById('settingCooldown');
+            const cooldown_minutes = cooldownEl ? cooldownEl.value.trim() : '60';
             const timeoutEl = document.getElementById('settingTimeoutHours');
             const timeout_hours = timeoutEl ? timeoutEl.value.trim() : '2';
 
@@ -3649,6 +3680,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         daily_limit: daily_limit,
+                        cooldown_minutes: cooldown_minutes,
                         claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })
@@ -3661,6 +3693,8 @@ INDEX_HTML = """
             const auth_mode = authModeEl ? authModeEl.value : 'whitelist';
             const dailyLimitEl = document.getElementById('settingDailyLimit');
             const daily_limit = dailyLimitEl ? dailyLimitEl.value.trim() : '3';
+            const cooldownEl = document.getElementById('settingCooldown');
+            const cooldown_minutes = cooldownEl ? cooldownEl.value.trim() : '60';
             const timeoutEl = document.getElementById('settingTimeoutHours');
             const timeout_hours = timeoutEl ? timeoutEl.value.trim() : '2';
 
@@ -3674,6 +3708,7 @@ INDEX_HTML = """
                     body: JSON.stringify({
                         auth_mode: auth_mode,
                         daily_limit: daily_limit,
+                        cooldown_minutes: cooldown_minutes,
                         claim_timeout_hours: timeout_hours,
                         whitelist: currentWhitelist
                     })
