@@ -1382,7 +1382,7 @@ def admin_add_material():
     if not copy_text:
         return jsonify({'success': False, 'error': '请填写发布文案！'})
     if len(final_images) == 0:
-        return jsonify({'success': False, 'error': '请至少在图1(封面)上传配图！'})
+        return jsonify({'success': False, 'error': '请至少上传一张配图！'})
         
     title = group_name
     first_line = copy_text.split('\n')[0].strip()
@@ -1391,6 +1391,7 @@ def admin_add_material():
         
     last_tag = extract_last_tag(copy_text)
     now_str = get_beijing_now_str()
+    imgs_json = json.dumps(final_images, ensure_ascii=False)
     
     conn = get_db()
     cursor = conn.cursor()
@@ -1398,9 +1399,23 @@ def admin_add_material():
         cursor.execute("""
         INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
         VALUES (?, ?, 'cloud_upload', ?, ?, ?, 'available', ?)
-        """, (group_name, title, json.dumps(final_images, ensure_ascii=False), copy_text, last_tag, now_str))
+        """, (group_name, title, imgs_json, copy_text, last_tag, now_str))
         conn.commit()
         conn.close()
+
+        if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+            def _sync_single():
+                try:
+                    t_conn = TursoConn()
+                    t_cur = t_conn.cursor()
+                    t_cur.execute("""
+                    INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+                    VALUES (?, ?, 'cloud_upload', ?, ?, ?, 'available', ?)
+                    """, (group_name, title, imgs_json, copy_text, last_tag, now_str))
+                except Exception as e:
+                    print("Turso insert material error:", e)
+            threading.Thread(target=_sync_single, daemon=True).start()
+
         return jsonify({'success': True, 'message': f'🎉 素材【{group_name}】已成功加入素材池！'})
     except sqlite3.IntegrityError:
         conn.close()
@@ -1418,10 +1433,10 @@ def admin_batch_add():
     contents = data.get('contents', [])
     tails = data.get('tails', [])
     copies = data.get('copies', [])
-    prefix = data.get('prefix', '批量作品_').strip()
+    prefix = data.get('prefix', '单图作品_').strip()
     
     if not covers or len(covers) == 0:
-        return jsonify({'success': False, 'error': '请至少上传一批【图1 · 封面图】！'})
+        return jsonify({'success': False, 'error': '请至少上传一批配图（每张配图对应1篇文案）！'})
     if not copies or len(copies) == 0:
         return jsonify({'success': False, 'error': '请至少提供一组文案！'})
         
@@ -1431,6 +1446,7 @@ def admin_batch_add():
     conn = get_db()
     cursor = conn.cursor()
     success_count = 0
+    new_materials = []
     
     for i in range(count):
         g_name = f"{prefix}第{i+1:02d}组_{datetime.datetime.now().strftime('%m%d_%H%M%S')}_{i+1}"
@@ -1439,25 +1455,40 @@ def admin_batch_add():
         title = first_line[:30] if first_line else g_name
         last_tag = extract_last_tag(copy)
         
-        imgs = []
-        if i < len(covers): imgs.append(covers[i])
-        if i < len(contents): imgs.append(contents[i])
-        elif len(contents) > 0: imgs.append(contents[0])
-        if i < len(tails): imgs.append(tails[i])
-        elif len(tails) > 0: imgs.append(tails[0])
+        imgs = [covers[i]]
+        if i < len(contents) and contents[i]: imgs.append(contents[i])
+        if i < len(tails) and tails[i]: imgs.append(tails[i])
         
+        imgs_json = json.dumps(imgs, ensure_ascii=False)
         try:
             cursor.execute("""
             INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
             VALUES (?, ?, 'cloud_batch', ?, ?, ?, 'available', ?)
-            """, (g_name, title, json.dumps(imgs, ensure_ascii=False), copy, last_tag, now_str))
+            """, (g_name, title, imgs_json, copy, last_tag, now_str))
             success_count += 1
+            new_materials.append((g_name, title, imgs_json, copy, last_tag, now_str))
         except Exception:
             pass
             
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品！'})
+
+    # Replicate newly added batch materials to Turso cloud
+    if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN and new_materials:
+        def _sync_batch_to_turso():
+            try:
+                t_conn = TursoConn()
+                t_cur = t_conn.cursor()
+                for item in new_materials:
+                    t_cur.execute("""
+                    INSERT INTO materials (group_name, title, folder_path, images_json, copy_text, last_tag, status, created_at)
+                    VALUES (?, ?, 'cloud_batch', ?, ?, ?, 'available', ?)
+                    """, item)
+            except Exception as e:
+                print("batch sync to turso error:", e)
+        threading.Thread(target=_sync_batch_to_turso, daemon=True).start()
+
+    return jsonify({'success': True, 'message': f'🎉 成功一键批量组装并入库 {success_count} 组全新作品（1图配1文案）！'})
 
 def get_pipeline_db():
     if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
@@ -1501,7 +1532,8 @@ def save_pipeline_queues(covers, contents, ends, copies):
 
 def trigger_pipeline_auto_assembly(prefix='装配作品_'):
     counts = get_pipeline_counts()
-    assemble_count = min(counts['covers'], counts['contents'], counts['ends'], counts['copies'])
+    # 核心配对规则升级：1张配图(covers) + 1篇文案(copies) 即可立刻吐出成品作品！
+    assemble_count = min(counts['covers'], counts['copies'])
     if assemble_count <= 0:
         return 0, {
             'covers': counts['covers'],
@@ -1520,26 +1552,36 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
     for i in range(assemble_count):
         cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'covers' ORDER BY id ASC LIMIT 1")
         c_row = cursor.fetchone()
-        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'contents' ORDER BY id ASC LIMIT 1")
-        cnt_row = cursor.fetchone()
-        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'ends' ORDER BY id ASC LIMIT 1")
-        e_row = cursor.fetchone()
         cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'copies' ORDER BY id ASC LIMIT 1")
         cp_row = cursor.fetchone()
 
-        if not (c_row and cnt_row and e_row and cp_row):
+        if not (c_row and cp_row):
             break
 
         cover_id, cover = c_row[0], c_row[1]
-        content_id, content = cnt_row[0], cnt_row[1]
-        end_id, end = e_row[0], e_row[1]
         copy_id, copy_text = cp_row[0], cp_row[1]
+        delete_ids = [cover_id, copy_id]
+        assembled_images = [cover]
+
+        # 选填：若队列中备有图2内容图，顺带拼装并消耗
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'contents' ORDER BY id ASC LIMIT 1")
+        cnt_row = cursor.fetchone()
+        if cnt_row:
+            delete_ids.append(cnt_row[0])
+            assembled_images.append(cnt_row[1])
+
+        # 选填：若队列中备有图3尾图，顺带拼装并消耗
+        cursor.execute("SELECT id, content FROM pipeline_queue WHERE slot = 'ends' ORDER BY id ASC LIMIT 1")
+        e_row = cursor.fetchone()
+        if e_row:
+            delete_ids.append(e_row[0])
+            assembled_images.append(e_row[1])
 
         group_name = f"{prefix}{time_tag}_{i+1:02d}"
         first_line = copy_text.split('\n')[0].strip() if copy_text else ''
         title = first_line[:30] if first_line else group_name
         last_tag = extract_last_tag(copy_text)
-        images_json = json.dumps([cover, content, end], ensure_ascii=False)
+        images_json = json.dumps(assembled_images, ensure_ascii=False)
         now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
 
         # Insert into both pipeline DB and local worker claim DB
@@ -1560,7 +1602,8 @@ def trigger_pipeline_auto_assembly(prefix='装配作品_'):
         except Exception:
             pass
 
-        cursor.execute("DELETE FROM pipeline_queue WHERE id IN (?, ?, ?, ?)", (cover_id, content_id, end_id, copy_id))
+        placeholders = ', '.join(['?'] * len(delete_ids))
+        cursor.execute(f"DELETE FROM pipeline_queue WHERE id IN ({placeholders})", delete_ids)
         assembled_actual += 1
 
     conn.commit()
@@ -1924,7 +1967,7 @@ INDEX_HTML = """
             <!-- 3 Images Grid -->
             <div>
                 <div class="flex items-center justify-between mb-2">
-                    <span class="text-xs font-bold text-slate-700">🖼️ 发布配图 (按 1、2、3 顺序配图)：</span>
+                    <span id="imagesSectionTitle" class="text-xs font-bold text-slate-700">🖼️ 发布配图：</span>
                     <div class="flex items-center space-x-2">
                         <a id="downloadZipBtn" href="#" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded-lg font-bold transition border border-slate-200 flex items-center space-x-1">
                             <span>📥 一键打包下载 (ZIP)</span>
@@ -2248,249 +2291,149 @@ INDEX_HTML = """
                 <div class="border border-emerald-200 bg-emerald-50/70 rounded-2xl p-4 space-y-3">
                     <!-- Tab Switcher -->
                     <div class="flex items-center space-x-2 border-b border-emerald-200/80 pb-3 flex-wrap gap-1">
-                        <button onclick="switchUploadTab('pipeline')" id="tabBtnPipeline" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white shadow-sm transition">
-                            🏭 【流水线自动装配池】(零散传图，3槽+文案≥1自动吐出成品)
-                        </button>
-                        <button onclick="switchUploadTab('batch')" id="tabBtnBatch" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
-                            ⚡️ 【批量图库一次性拼装】
+                        <button onclick="switchUploadTab('batch')" id="tabBtnBatch" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white shadow-sm transition">
+                            ⚡️ 【批量快速拼装 (1图配1文案)】推荐
                         </button>
                         <button onclick="switchUploadTab('single')" id="tabBtnSingle" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
                             📌 【单组精准上传】
                         </button>
+                        <button onclick="switchUploadTab('pipeline')" id="tabBtnPipeline" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition">
+                            🏭 【流水线自动装配池】
+                        </button>
                     </div>
 
-                    <!-- TAB 1: PIPELINE AUTO ASSEMBLER QUEUE (NEW) -->
-                    <div id="pipelineUploadPanel" class="space-y-3 text-xs">
-                        <!-- Pipeline Live Status Banner -->
-                        <div class="p-3 bg-white rounded-xl border border-emerald-200 shadow-sm space-y-2.5">
-                            <div class="flex items-center justify-between flex-wrap gap-2">
-                                <div class="flex items-center space-x-2">
-                                    <span class="text-xs font-bold text-slate-800">🏭 当前零件缓冲箱监控：</span>
-                                    <span id="pipelineStatusTip" class="text-[11px] text-emerald-800 font-medium">随时随地随手扔图，各模块 ≥ 1 立即自动装配</span>
-                                </div>
-                                <div class="flex items-center space-x-2">
-                                    <button onclick="clearPipelineBuffer('all')" class="text-[10px] text-slate-400 hover:text-red-600 transition font-medium">
-                                        🗑️ 一键清空所有缓冲箱
-                                    </button>
-                                    <button onclick="refreshPipelineStatus()" class="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-bold hover:bg-emerald-100 transition">
-                                        🔄 刷新库存
-                                    </button>
-                                </div>
+                    <!-- TAB 1: BATCH 1-IMAGE-1-COPY ASSEMBLER (DEFAULT ACTIVE) -->
+                    <div id="batchUploadPanel" class="space-y-3 text-xs">
+                        <div class="p-3 bg-gradient-to-r from-emerald-50 to-teal-50 rounded-xl border border-emerald-300 text-emerald-950 leading-relaxed text-xs space-y-1">
+                            <div class="font-bold text-emerald-900 flex items-center space-x-1.5">
+                                <span>⚡️</span>
+                                <span>【1图配1文案】极速拼装模式 (全新单图模版专选)</span>
                             </div>
-
-                            <!-- 4 Buffer Counter Chips -->
-                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
-                                <div class="p-2 bg-emerald-50 rounded-lg border border-emerald-200">
-                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 封面图池 (图1)</div>
-                                    <div id="bufCountCovers" class="text-base font-black text-emerald-700 mt-0.5">0 张</div>
-                                    <div id="bufBadgeCovers" class="text-[9px] font-bold text-amber-600">待补充</div>
-                                </div>
-                                <div class="p-2 bg-blue-50 rounded-lg border border-blue-200">
-                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 内容图池 (图2)</div>
-                                    <div id="bufCountContents" class="text-base font-black text-blue-700 mt-0.5">0 张</div>
-                                    <div id="bufBadgeContents" class="text-[9px] font-bold text-amber-600">待补充</div>
-                                </div>
-                                <div class="p-2 bg-purple-50 rounded-lg border border-purple-200">
-                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 尾图池 (图3)</div>
-                                    <div id="bufCountEnds" class="text-base font-black text-purple-700 mt-0.5">0 张</div>
-                                    <div id="bufBadgeEnds" class="text-[9px] font-bold text-amber-600">待补充</div>
-                                </div>
-                                <div class="p-2 bg-amber-50 rounded-lg border border-amber-200">
-                                    <div class="text-slate-500 text-[10px] font-medium">📝 文案池</div>
-                                    <div id="bufCountCopies" class="text-base font-black text-amber-700 mt-0.5">0 篇</div>
-                                    <div id="bufBadgeCopies" class="text-[9px] font-bold text-amber-600">待补充</div>
-                                </div>
-                            </div>
-
-                            <!-- Auto Assembly Progress Banner -->
-                            <div id="pipelineAssembleAlert" class="p-2.5 rounded-xl bg-indigo-50/80 border border-indigo-200 text-indigo-950 text-xs flex items-center justify-between shadow-xs">
-                                <span id="pipelineAlertText">💡 提示：4 个箱子各有 ≥ 1 时，系统会自动消耗 1 套组装成新笔记（新笔记直接进入下方素材库）。如果放入后发现数量减少，说明已经成功合体生成作品了！</span>
-                            </div>
+                            <p class="text-slate-600 text-[11px]">
+                                只需两步：多选一批配图（按住 Ctrl/Cmd 批量多选，如 10 张图），再放入对应篇数的文案（10 篇），系统立即 1 对 1 自动合成入库！
+                            </p>
                         </div>
 
-                        <!-- 4 Drop Modules -->
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <!-- Drop Slot 1: Covers -->
-                            <div id="dropZoneSlot1" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50/30 transition-all duration-200 space-y-2">
-                                <div class="font-bold text-emerald-800 flex items-center justify-between">
-                                    <span class="flex items-center space-x-1">
-                                        <span>🖼️【图1·封面图】</span>
-                                    </span>
-                                    <button onclick="clearPipelineBuffer('covers')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
-                                </div>
-                                <input type="file" id="pipeSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('covers', 'pipeSlot1')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
-                                <div id="pipeProgressSlot1" class="hidden p-2 bg-emerald-50 rounded-lg border border-emerald-200 text-xs"></div>
-                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
+                        <!-- Step 1: Batch Select Images -->
+                        <div id="batchDropZone1" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-emerald-400 hover:border-emerald-600 transition space-y-2">
+                            <div class="flex items-center justify-between font-bold text-slate-800">
+                                <span class="flex items-center space-x-1.5 text-emerald-800 text-xs">
+                                    <span>📸</span>
+                                    <span>第一步：批量多选【笔记单图配图】</span>
+                                    <span class="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-semibold">1图对应1文案</span>
+                                </span>
+                                <span id="batchCount1" class="text-xs text-emerald-700 font-bold bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-200">已选 0 张图片</span>
                             </div>
-
-                            <!-- Drop Slot 2: Contents -->
-                            <div id="dropZoneSlot2" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-blue-300 hover:border-blue-500 hover:bg-blue-50/30 transition-all duration-200 space-y-2">
-                                <div class="font-bold text-blue-800 flex items-center justify-between">
-                                    <span class="flex items-center space-x-1">
-                                        <span>🎨【图2·内容图】</span>
-                                    </span>
-                                    <button onclick="clearPipelineBuffer('contents')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
-                                </div>
-                                <input type="file" id="pipeSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('contents', 'pipeSlot2')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer">
-                                <div id="pipeProgressSlot2" class="hidden p-2 bg-blue-50 rounded-lg border border-blue-200 text-xs"></div>
-                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
-                            </div>
-
-                            <!-- Drop Slot 3: Ends -->
-                            <div id="dropZoneSlot3" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-purple-300 hover:border-purple-500 hover:bg-purple-50/30 transition-all duration-200 space-y-2">
-                                <div class="font-bold text-purple-800 flex items-center justify-between">
-                                    <span class="flex items-center space-x-1">
-                                        <span>🌅【图3·尾图】</span>
-                                    </span>
-                                    <button onclick="clearPipelineBuffer('ends')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
-                                </div>
-                                <input type="file" id="pipeSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('ends', 'pipeSlot3')"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white hover:file:bg-purple-700 cursor-pointer">
-                                <div id="pipeProgressSlot3" class="hidden p-2 bg-purple-50 rounded-lg border border-purple-200 text-xs"></div>
-                                <p class="text-[9px] text-slate-400">💡 支持点击选择，或直接从桌面/文件夹<b>拖入框内</b></p>
-                            </div>
+                            <input type="file" id="batchSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(1); updateBatchPreviewStats();"
+                                class="w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
+                            <p class="text-[10px] text-slate-400">💡 提示：支持弹窗批量框选（按住 Shift/Cmd 可全选），也可直接将多张图片拖拽到此处</p>
                         </div>
 
-                        <!-- Drop Slot 4: Copies -->
-                        <div class="bg-white p-3 rounded-xl border border-amber-300 space-y-2">
-                            <div class="flex items-center justify-between font-bold text-amber-800 flex-wrap gap-1">
-                                <span class="flex items-center space-x-1">
-                                    <span>📝 补充文案池</span>
-                                    <span class="text-[10px] text-slate-400 font-normal">(支持粘贴或上传 .txt 文件，多篇用 <code>===</code> 分隔)</span>
+                        <!-- Step 2: Batch Copies -->
+                        <div class="bg-white p-3.5 rounded-xl border border-emerald-300 space-y-2">
+                            <div class="flex items-center justify-between font-bold text-slate-800 flex-wrap gap-1">
+                                <span class="flex items-center space-x-1.5 text-emerald-800 text-xs">
+                                    <span>📝</span>
+                                    <span>第二步：对应文案池</span>
+                                    <span class="text-[10px] text-slate-400 font-normal">(多篇用 <code>===</code> 分隔，第一行自动作为标题)</span>
                                 </span>
                                 <div class="flex items-center space-x-2">
-                                    <label class="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
+                                    <span id="batchCopyCountBadge" class="text-xs text-amber-700 font-bold bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">已识别 0 篇文案</span>
+                                    <label class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
                                         <span>📁 批量上传 .txt 文案</span>
-                                        <input type="file" id="pipeTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handlePipelineTxtUpload(event)" class="hidden">
+                                        <input type="file" id="batchTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handleBatchTxtUpload(event)" class="hidden">
                                     </label>
-                                    <button onclick="clearPipelineBuffer('copies')" class="text-[9px] text-slate-400 hover:text-red-500">清空文案箱</button>
                                 </div>
                             </div>
-                            <textarea id="pipeCopyInput" rows="3" placeholder="可以直接在此输入/粘贴文案（多篇用 === 分隔），也可以点击上方【📁 批量上传 .txt 文案】一键导入..." 
-                                class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-xs text-slate-800"></textarea>
-                            <div class="flex justify-end">
-                                <button onclick="uploadPipelineCopies()" id="pipeCopyBtn" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-sm flex items-center space-x-1">
-                                    <span>📥 确认将文案加入文案箱并检测装配</span>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- TAB 2: BATCH AUTO ASSEMBLER -->
-                    <div id="batchUploadPanel" class="space-y-3 text-xs hidden">
-                        <div class="p-2.5 bg-white/90 rounded-xl border border-emerald-200 text-emerald-900 leading-relaxed text-[11px]">
-                            💡 <strong>批量拼装玩法</strong>：让同事在【图1】多选 20 张封面实况，在【图2】多选 20 张内容，在【图3】选尾图，下方粘贴 20 段文案或点击【📁 批量上传 .txt 文案】，点击按钮系统<strong>1 秒自动拼装生成 20 组独家作品！</strong>
+                            <textarea id="batchCopyInput" rows="5" oninput="updateBatchPreviewStats()" placeholder="第一篇文案内容...末尾带 #代运营&#10;===&#10;第二篇文案内容...末尾带 #小红书获客&#10;===&#10;（也可点击右上角【📁 批量上传 .txt 文案】一次性选入多个 .txt 文本文件，自动按文件名读取）" 
+                                class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono text-xs text-slate-800"></textarea>
                         </div>
 
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                            <!-- Batch Slot 1 -->
-                            <div class="bg-white p-3 rounded-xl border border-emerald-300 space-y-1.5">
-                                <div class="font-bold text-emerald-800 flex items-center justify-between">
-                                    <span>🖼️ 批量选【图1·封面图】</span>
-                                    <span id="batchCount1" class="text-[10px] text-emerald-600 font-normal">已选 0 张</span>
+                        <!-- Optional Extra Images Collapsible (Hidden by Default) -->
+                        <div class="pt-0.5">
+                            <button type="button" onclick="toggleBatchExtraImages()" class="text-[11px] text-slate-500 hover:text-emerald-700 flex items-center space-x-1 font-medium transition">
+                                <span id="batchExtraToggleIcon">▶</span>
+                                <span>选填高级项：追加多图模版（图2内容图 / 图3尾图，默认留空即为纯单图模版）</span>
+                            </button>
+                            <div id="batchExtraImagesBox" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2 hidden">
+                                <div class="bg-white p-2.5 rounded-xl border border-blue-200 space-y-1">
+                                    <div class="font-bold text-blue-800 flex items-center justify-between text-[11px]">
+                                        <span>🎨 选填：【图2·内容图】</span>
+                                        <span id="batchCount2" class="text-[10px] text-blue-600 font-normal">已选 0 张</span>
+                                    </div>
+                                    <input type="file" id="batchSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(2)"
+                                        class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
                                 </div>
-                                <input type="file" id="batchSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(1)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
-                            </div>
-
-                            <!-- Batch Slot 2 -->
-                            <div class="bg-white p-3 rounded-xl border border-blue-300 space-y-1.5">
-                                <div class="font-bold text-blue-800 flex items-center justify-between">
-                                    <span>🖼️ 批量选【图2·内容图】</span>
-                                    <span id="batchCount2" class="text-[10px] text-blue-600 font-normal">已选 0 张</span>
+                                <div class="bg-white p-2.5 rounded-xl border border-purple-200 space-y-1">
+                                    <div class="font-bold text-purple-800 flex items-center justify-between text-[11px]">
+                                        <span>🌅 选填：【图3·尾图】</span>
+                                        <span id="batchCount3" class="text-[10px] text-purple-600 font-normal">已选 0 张</span>
+                                    </div>
+                                    <input type="file" id="batchSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(3)"
+                                        class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white cursor-pointer">
                                 </div>
-                                <input type="file" id="batchSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(2)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
-                            </div>
-
-                            <!-- Batch Slot 3 -->
-                            <div class="bg-white p-3 rounded-xl border border-amber-300 space-y-1.5">
-                                <div class="font-bold text-amber-800 flex items-center justify-between">
-                                    <span>🖼️ 批量选【图3·尾图】</span>
-                                    <span id="batchCount3" class="text-[10px] text-amber-600 font-normal">已选 0 张</span>
-                                </div>
-                                <input type="file" id="batchSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="updateBatchCount(3)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-amber-600 file:text-white cursor-pointer">
                             </div>
                         </div>
 
-                        <div>
-                            <div class="flex items-center justify-between font-semibold text-slate-700 mb-1 flex-wrap gap-1">
-                                <label>
-                                    批量文案池 (每篇文案用三个等号 <code>===</code> 隔开，第一行自动作为标题)：
-                                </label>
-                                <label class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
-                                    <span>📁 批量上传 .txt 文案</span>
-                                    <input type="file" id="batchTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handleBatchTxtUpload(event)" class="hidden">
-                                </label>
+                        <!-- Submit Bar -->
+                        <div class="flex items-center justify-between pt-2 flex-wrap gap-2 border-t border-emerald-200/60">
+                            <div class="flex items-center space-x-2">
+                                <span class="text-xs text-slate-500 font-medium">作品前缀：</span>
+                                <input type="text" id="batchPrefix" placeholder="组名前缀" value="单图作品_"
+                                    class="px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs w-32 font-medium">
+                                <div id="batchMatchSummary"></div>
                             </div>
-                            <textarea id="batchCopyInput" rows="5" placeholder="第一篇文案内容...末尾带 #杭州代运营&#10;===&#10;第二篇文案内容...末尾带 #上海代运营&#10;===&#10;（支持点击右上角【📁 批量上传 .txt 文案】一次性导入多个 .txt 文件）" 
-                                class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 text-xs font-mono"></textarea>
-                        </div>
-
-                        <div class="flex items-center justify-between pt-1">
-                            <input type="text" id="batchPrefix" placeholder="组名前缀 (如: 代运营矩阵_)" value="代运营矩阵_"
-                                class="px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs w-48 font-medium">
-                            <button onclick="submitBatchMaterials()" id="batchSubmitBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
-                                <span>⚡️ 一键批量自动组装并入库</span>
+                            <button onclick="submitBatchMaterials()" id="batchSubmitBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1.5">
+                                <span>⚡️ 立即一键生成入库（1图配1文案）</span>
                             </button>
                         </div>
                     </div>
 
-                    <!-- TAB 3: SINGLE SLOT UPLOAD -->
+                    <!-- TAB 2: SINGLE SLOT UPLOAD -->
                     <div id="singleUploadPanel" class="space-y-3 text-xs hidden">
                         <div>
                             <label class="block font-semibold text-slate-700 mb-1">作品组名 / 标题：</label>
-                            <input type="text" id="newGroupInput" placeholder="例如: 第13组_8年单干老手聊聊代运营" 
+                            <input type="text" id="newGroupInput" placeholder="例如: 单图获客_01" 
                                 class="w-full px-3 py-2 bg-white border border-emerald-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-xs">
                         </div>
 
-                        <!-- 3 SEPARATE UPLOAD SLOTS -->
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-emerald-300 space-y-2 flex flex-col justify-between">
-                                <div>
-                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
-                                        <span class="text-emerald-700">🖼️ 图1 · 封面图</span>
-                                        <span class="text-[10px] text-red-500 bg-red-50 px-1.5 py-0.5 rounded">必填</span>
-                                    </div>
-                                    <p class="text-[10px] text-slate-400">实况动图 / 封面原图</p>
-                                </div>
-                                <input type="file" id="slot1File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(1)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
-                                <div id="slot1Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
-                                    待选图1
-                                </div>
+                        <!-- Primary Image Slot (Single image) -->
+                        <div class="bg-white p-3.5 rounded-xl border-2 border-dashed border-emerald-300 space-y-2">
+                            <div class="flex items-center justify-between font-bold text-slate-800">
+                                <span class="text-emerald-700 flex items-center space-x-1">
+                                    <span>📸 笔记配图</span>
+                                    <span class="text-[10px] text-red-500 bg-red-50 px-1.5 py-0.5 rounded">必填 · 单图模版传此张即可</span>
+                                </span>
                             </div>
-
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-blue-300 space-y-2 flex flex-col justify-between">
-                                <div>
-                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
-                                        <span class="text-blue-700">🖼️ 图2 · 内容图</span>
-                                        <span class="text-[10px] text-blue-500 bg-blue-50 px-1.5 py-0.5 rounded">选填</span>
-                                    </div>
-                                    <p class="text-[10px] text-slate-400">正文详情实况 / 图表</p>
-                                </div>
-                                <input type="file" id="slot2File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(2)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
-                                <div id="slot2Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
-                                    待选图2
-                                </div>
+                            <input type="file" id="slot1File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(1)"
+                                class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer">
+                            <div id="slot1Preview" class="h-24 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                待选配图
                             </div>
+                        </div>
 
-                            <div class="bg-white p-3 rounded-xl border-2 border-dashed border-amber-300 space-y-2 flex flex-col justify-between">
-                                <div>
-                                    <div class="flex items-center justify-between font-bold text-slate-800 mb-1">
-                                        <span class="text-amber-700">🖼️ 图3 · 尾图</span>
-                                        <span class="text-[10px] text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded">选填</span>
+                        <!-- Optional Extra Slots Collapsible -->
+                        <div>
+                            <button type="button" onclick="toggleSingleExtraImages()" class="text-[11px] text-slate-500 hover:text-emerald-700 flex items-center space-x-1 font-medium transition">
+                                <span id="singleExtraToggleIcon">▶</span>
+                                <span>选填项：追加多图（图2内容图 / 图3尾图，不填即为单图）</span>
+                            </button>
+                            <div id="singleExtraImagesBox" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2 hidden">
+                                <div class="bg-white p-2.5 rounded-xl border border-blue-200 space-y-1">
+                                    <span class="text-[11px] font-bold text-blue-700">🎨 选填：图2 · 内容图</span>
+                                    <input type="file" id="slot2File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(2)"
+                                        class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
+                                    <div id="slot2Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                        待选图2
                                     </div>
-                                    <p class="text-[10px] text-slate-400">引导转化 / 尾图</p>
                                 </div>
-                                <input type="file" id="slot3File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(3)"
-                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-amber-600 file:text-white cursor-pointer">
-                                <div id="slot3Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
-                                    待选图3
+                                <div class="bg-white p-2.5 rounded-xl border border-purple-200 space-y-1">
+                                    <span class="text-[11px] font-bold text-purple-700">🌅 选填：图3 · 尾图</span>
+                                    <input type="file" id="slot3File" accept="image/*,video/*,.heic,.mov" onchange="previewSlot(3)"
+                                        class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white cursor-pointer">
+                                    <div id="slot3Preview" class="h-16 bg-slate-50 rounded-lg flex items-center justify-center text-[10px] text-slate-400 border border-slate-100 overflow-hidden">
+                                        待选图3
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -2511,6 +2454,119 @@ INDEX_HTML = """
                             <button onclick="submit3SlotsMaterial()" id="add3SlotsBtn" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1">
                                 <span>🚀 保存单组并派入素材池</span>
                             </button>
+                        </div>
+                    </div>
+
+                    <!-- TAB 3: PIPELINE AUTO ASSEMBLER QUEUE -->
+                    <div id="pipelineUploadPanel" class="space-y-3 text-xs hidden">
+                        <!-- Pipeline Live Status Banner -->
+                        <div class="p-3 bg-white rounded-xl border border-emerald-200 shadow-sm space-y-2.5">
+                            <div class="flex items-center justify-between flex-wrap gap-2">
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-xs font-bold text-slate-800">🏭 当前零件缓冲箱监控：</span>
+                                    <span id="pipelineStatusTip" class="text-[11px] text-emerald-800 font-medium">【核心配图】+【文案】各有 ≥ 1 立即自动合体生成作品</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <button onclick="clearPipelineBuffer('all')" class="text-[10px] text-slate-400 hover:text-red-600 transition font-medium">
+                                        🗑️ 一键清空所有缓冲箱
+                                    </button>
+                                    <button onclick="refreshPipelineStatus()" class="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-bold hover:bg-emerald-100 transition">
+                                        🔄 刷新库存
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- 4 Buffer Counter Chips -->
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                                <div class="p-2 bg-emerald-50 rounded-lg border border-emerald-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">📸 核心配图池 (必填)</div>
+                                    <div id="bufCountCovers" class="text-base font-black text-emerald-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeCovers" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                                <div class="p-2 bg-amber-50 rounded-lg border border-amber-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">📝 核心文案池 (必填)</div>
+                                    <div id="bufCountCopies" class="text-base font-black text-amber-700 mt-0.5">0 篇</div>
+                                    <div id="bufBadgeCopies" class="text-[9px] font-bold text-amber-600">待补充</div>
+                                </div>
+                                <div class="p-2 bg-blue-50 rounded-lg border border-blue-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">🖼️ 内容图池 (选填)</div>
+                                    <div id="bufCountContents" class="text-base font-black text-blue-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeContents" class="text-[9px] font-bold text-slate-400">选填备用</div>
+                                </div>
+                                <div class="p-2 bg-purple-50 rounded-lg border border-purple-200">
+                                    <div class="text-slate-500 text-[10px] font-medium">🌅 尾图池 (选填)</div>
+                                    <div id="bufCountEnds" class="text-base font-black text-purple-700 mt-0.5">0 张</div>
+                                    <div id="bufBadgeEnds" class="text-[9px] font-bold text-slate-400">选填备用</div>
+                                </div>
+                            </div>
+
+                            <!-- Auto Assembly Progress Banner -->
+                            <div id="pipelineAssembleAlert" class="p-2.5 rounded-xl bg-indigo-50/80 border border-indigo-200 text-indigo-950 text-xs flex items-center justify-between shadow-xs">
+                                <span id="pipelineAlertText">💡 规则升级：只要【核心配图】与【核心文案】各有 ≥ 1，系统自动秒级消耗合体生成全新作品！若内容图/尾图有备用也会按序装配。</span>
+                            </div>
+                        </div>
+
+                        <!-- 4 Drop Modules -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <!-- Drop Slot 1: Covers -->
+                            <div id="dropZoneSlot1" class="bg-white p-3.5 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50/30 transition-all duration-200 space-y-2">
+                                <div class="font-bold text-emerald-800 flex items-center justify-between">
+                                    <span class="flex items-center space-x-1">
+                                        <span>📸【核心配图箱】(必填)</span>
+                                    </span>
+                                    <button onclick="clearPipelineBuffer('covers')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空此箱</button>
+                                </div>
+                                <input type="file" id="pipeSlot1" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('covers', 'pipeSlot1')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
+                                <div id="pipeProgressSlot1" class="hidden p-2 bg-emerald-50 rounded-lg border border-emerald-200 text-xs"></div>
+                                <p class="text-[9px] text-slate-400">💡 支持批量多选，或直接将文件夹/桌面上的多张图片拖入框内</p>
+                            </div>
+
+                            <!-- Drop Slot 4: Copies -->
+                            <div class="bg-white p-3.5 rounded-xl border border-amber-300 space-y-2">
+                                <div class="flex items-center justify-between font-bold text-amber-800 flex-wrap gap-1">
+                                    <span class="flex items-center space-x-1">
+                                        <span>📝【核心文案箱】(必填)</span>
+                                    </span>
+                                    <div class="flex items-center space-x-2">
+                                        <label class="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[11px] font-bold cursor-pointer transition flex items-center space-x-1 shadow-xs">
+                                            <span>📁 批量上传 .txt 文案</span>
+                                            <input type="file" id="pipeTxtFileInput" multiple accept=".txt,.text,text/plain" onchange="handlePipelineTxtUpload(event)" class="hidden">
+                                        </label>
+                                        <button onclick="clearPipelineBuffer('copies')" class="text-[9px] text-slate-400 hover:text-red-500">清空文案箱</button>
+                                    </div>
+                                </div>
+                                <textarea id="pipeCopyInput" rows="3" placeholder="在此输入/粘贴文案（多篇用 === 分隔），或点右上角【📁 批量上传 .txt 文案】..." 
+                                    class="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-xs text-slate-800"></textarea>
+                                <div class="flex justify-end">
+                                    <button onclick="uploadPipelineCopies()" id="pipeCopyBtn" class="px-3.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition shadow-sm flex items-center space-x-1">
+                                        <span>📥 确认入箱并检测装配</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Optional Slots 2 & 3: Contents and Ends -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                            <div id="dropZoneSlot2" class="bg-white p-3 rounded-xl border border-blue-200 space-y-1.5">
+                                <div class="font-bold text-blue-800 flex items-center justify-between text-xs">
+                                    <span>🎨【选填：内容图箱】</span>
+                                    <button onclick="clearPipelineBuffer('contents')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空</button>
+                                </div>
+                                <input type="file" id="pipeSlot2" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('contents', 'pipeSlot2')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-0.5 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-blue-600 file:text-white cursor-pointer">
+                                <div id="pipeProgressSlot2" class="hidden p-1.5 bg-blue-50 rounded border border-blue-200 text-[10px]"></div>
+                            </div>
+
+                            <div id="dropZoneSlot3" class="bg-white p-3 rounded-xl border border-purple-200 space-y-1.5">
+                                <div class="font-bold text-purple-800 flex items-center justify-between text-xs">
+                                    <span>🌅【选填：尾图箱】</span>
+                                    <button onclick="clearPipelineBuffer('ends')" class="text-[9px] text-slate-400 hover:text-red-500 transition">清空</button>
+                                </div>
+                                <input type="file" id="pipeSlot3" multiple accept="image/*,video/*,.heic,.mov" onchange="uploadPipelineSlot('ends', 'pipeSlot3')"
+                                    class="w-full text-[10px] text-slate-500 file:mr-2 file:py-0.5 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-purple-600 file:text-white cursor-pointer">
+                                <div id="pipeProgressSlot3" class="hidden p-1.5 bg-purple-50 rounded border border-purple-200 text-[10px]"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2660,6 +2716,7 @@ INDEX_HTML = """
             if (nameEl && savedName) nameEl.value = savedName;
             if (savedName) checkUserStatus();
             setupPipelineDropZones();
+            setupBatchDropZones();
         });
 
         function saveCredentials() {
@@ -2874,6 +2931,7 @@ INDEX_HTML = """
             const imagesGrid = document.getElementById('imagesGrid');
             const copyPre = document.getElementById('copyTextPre');
             const zipBtn = document.getElementById('downloadZipBtn');
+            const imagesSectionTitle = document.getElementById('imagesSectionTitle');
 
             matBadge.innerText = mat.group_name.split('_')[0] || '独家素材';
             matTitle.innerText = mat.title || mat.group_name;
@@ -2881,22 +2939,47 @@ INDEX_HTML = """
             copyPre.innerText = mat.copy_text;
             zipBtn.href = `/api/download_zip?material_id=${mat.id}`;
 
-            imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
-                const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
-                const label = labels[idx] || `图${idx+1}`;
+            const isSingle = !mat.images || mat.images.length === 1;
+            if (imagesSectionTitle) {
+                imagesSectionTitle.innerText = isSingle ? '🖼️ 笔记配图 (单图作品)：' : '🖼️ 发布配图 (按 1、2、3 顺序配图)：';
+            }
+
+            if (isSingle && mat.images && mat.images.length > 0) {
+                imagesGrid.className = "flex justify-center my-2";
+                const imgPath = mat.images[0];
                 const srcUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
-                return `
-                    <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col shadow-sm">
+                imagesGrid.innerHTML = `
+                    <div class="relative group rounded-2xl overflow-hidden border-2 border-emerald-400 bg-slate-100 w-full max-w-[280px] sm:max-w-[320px] aspect-[3/4] flex flex-col shadow-md">
                         <img src="${srcUrl}" 
                              onclick="previewImg('${srcUrl}')" 
                              class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
-                             alt="${label}">
-                        <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
-                            ${label}
+                             alt="笔记单图配图">
+                        <div class="absolute bottom-0 inset-x-0 bg-emerald-950/80 backdrop-blur-sm text-white text-[11px] font-bold py-1.5 text-center flex items-center justify-center space-x-1">
+                            <span>📸 单图配图（点击放大 · 长按保存）</span>
                         </div>
                     </div>
                 `;
-            }).join('');
+            } else if (mat.images && mat.images.length > 1) {
+                imagesGrid.className = "grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3";
+                imagesGrid.innerHTML = mat.images.map((imgPath, idx) => {
+                    const labels = ['图1 · 封面', '图2 · 内容', '图3 · 尾图'];
+                    const label = labels[idx] || `图${idx+1}`;
+                    const srcUrl = imgPath.startsWith('data:') ? imgPath : `/api/image?path=${encodeURIComponent(imgPath)}`;
+                    return `
+                        <div class="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[3/4] flex flex-col shadow-sm">
+                            <img src="${srcUrl}" 
+                                 onclick="previewImg('${srcUrl}')" 
+                                 class="w-full h-full object-cover cursor-pointer hover:scale-105 transition duration-200" 
+                                 alt="${label}">
+                            <div class="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-1.5 py-1 text-center">
+                                ${label}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } else {
+                imagesGrid.innerHTML = '';
+            }
 
             matCard.classList.remove('hidden');
         }
@@ -3131,33 +3214,34 @@ INDEX_HTML = """
                     if (elEnds) elEnds.innerText = c.ends + ' 张';
                     if (elCopies) elCopies.innerText = c.copies + ' 篇';
 
-                    const updateBadge = (id, count) => {
+                    const updateBadge = (id, count, isRequired) => {
                         const el = document.getElementById(id);
                         if (!el) return;
                         if (count >= 1) {
                             el.className = 'text-[9px] font-bold text-emerald-600';
                             el.innerText = '🟢 已就绪 (' + count + ')';
-                        } else {
+                        } else if (isRequired) {
                             el.className = 'text-[9px] font-bold text-red-500';
-                            el.innerText = '🔴 缺货待补';
+                            el.innerText = '🔴 必填缺货';
+                        } else {
+                            el.className = 'text-[9px] font-bold text-slate-400';
+                            el.innerText = '⚪️ 选填待用 (0)';
                         }
                     };
-                    updateBadge('bufBadgeCovers', c.covers);
-                    updateBadge('bufBadgeContents', c.contents);
-                    updateBadge('bufBadgeEnds', c.ends);
-                    updateBadge('bufBadgeCopies', c.copies);
+                    updateBadge('bufBadgeCovers', c.covers, true);
+                    updateBadge('bufBadgeContents', c.contents, false);
+                    updateBadge('bufBadgeEnds', c.ends, false);
+                    updateBadge('bufBadgeCopies', c.copies, true);
 
                     const alertEl = document.getElementById('pipelineAlertText');
                     if (alertEl) {
-                        if (c.covers >= 1 && c.contents >= 1 && c.ends >= 1 && c.copies >= 1) {
-                            alertEl.innerHTML = '<span class="text-emerald-700 font-bold">🎉 4 个模块均满足条件，系统已自动组装入库！当前素材库已全部就绪！</span>';
+                        if (c.covers >= 1 && c.copies >= 1) {
+                            alertEl.innerHTML = '<span class="text-emerald-700 font-bold">🎉 核心配图与文案均已就绪，系统随时可自动拼装生成新作品！当前素材库已全部就绪！</span>';
                         } else {
                             const missing = [];
-                            if (c.covers < 1) missing.push('【图1·封面图】');
-                            if (c.contents < 1) missing.push('【图2·内容图】');
-                            if (c.ends < 1) missing.push('【图3·尾图】');
-                            if (c.copies < 1) missing.push('【文案】');
-                            alertEl.innerHTML = '<span class="text-amber-700 font-medium">💡 正在等待补充 ' + missing.join('、') + '，只要各模块数量 ≥ 1，系统将瞬间自动拼装生成作品！</span>';
+                            if (c.covers < 1) missing.push('【核心配图箱】');
+                            if (c.copies < 1) missing.push('【核心文案箱】');
+                            alertEl.innerHTML = '<span class="text-amber-700 font-medium">💡 正在等待补充 ' + missing.join('与') + '，只要配图与文案各有 ≥ 1，系统将瞬间自动拼装生成新作品！（图2内容图、图3尾图为选填）</span>';
                         }
                     }
                 }
@@ -3391,6 +3475,7 @@ INDEX_HTML = """
                 } else {
                     batchInput.value = copies.join(sep);
                 }
+                updateBatchPreviewStats();
             }
             showToast('🎉 成功从 ' + files.length + ' 个 .txt 文件中读取 ' + copies.length + ' 篇文案！');
             event.target.value = '';
@@ -3499,8 +3584,118 @@ INDEX_HTML = """
         function updateBatchCount(slot) {
             const input = document.getElementById(`batchSlot${slot}`);
             const span = document.getElementById(`batchCount${slot}`);
-            const count = input.files ? input.files.length : 0;
-            span.innerText = `已选 ${count} 张`;
+            const count = input && input.files ? input.files.length : 0;
+            if (span) {
+                if (slot === 1) {
+                    span.innerText = `已选 ${count} 张图片`;
+                } else {
+                    span.innerText = `已选 ${count} 张`;
+                }
+            }
+            if (slot === 1) {
+                updateBatchPreviewStats();
+            }
+        }
+
+        function updateBatchPreviewStats() {
+            const input = document.getElementById('batchSlot1');
+            const imgCount = input && input.files ? input.files.length : 0;
+            const copyInput = document.getElementById('batchCopyInput');
+            const rawCopy = copyInput ? copyInput.value.trim() : '';
+            const copies = rawCopy ? rawCopy.split('===').map(c => c.trim()).filter(c => c.length > 0) : [];
+            const copyCount = copies.length;
+
+            const badge = document.getElementById('batchCopyCountBadge');
+            if (badge) {
+                badge.innerText = `已识别 ${copyCount} 篇文案`;
+            }
+
+            const summary = document.getElementById('batchMatchSummary');
+            if (summary) {
+                if (imgCount > 0 && copyCount > 0) {
+                    const match = Math.min(imgCount, copyCount);
+                    summary.innerHTML = `<span class="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-300">✨ 可生成 ${match} 组作品</span>`;
+                } else if (imgCount > 0 && copyCount === 0) {
+                    summary.innerHTML = `<span class="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200 font-medium">还差文案 (已选 ${imgCount} 张图)</span>`;
+                } else if (imgCount === 0 && copyCount > 0) {
+                    summary.innerHTML = `<span class="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200 font-medium">还差配图 (已就绪 ${copyCount} 篇文案)</span>`;
+                } else {
+                    summary.innerHTML = '';
+                }
+            }
+        }
+
+        function toggleBatchExtraImages() {
+            const box = document.getElementById('batchExtraImagesBox');
+            const icon = document.getElementById('batchExtraToggleIcon');
+            if (!box) return;
+            if (box.classList.contains('hidden')) {
+                box.classList.remove('hidden');
+                if (icon) icon.innerText = '▼';
+            } else {
+                box.classList.add('hidden');
+                if (icon) icon.innerText = '▶';
+            }
+        }
+
+        function toggleSingleExtraImages() {
+            const box = document.getElementById('singleExtraImagesBox');
+            const icon = document.getElementById('singleExtraToggleIcon');
+            if (!box) return;
+            if (box.classList.contains('hidden')) {
+                box.classList.remove('hidden');
+                if (icon) icon.innerText = '▼';
+            } else {
+                box.classList.add('hidden');
+                if (icon) icon.innerText = '▶';
+            }
+        }
+
+        function setupBatchDropZones() {
+            const zone = document.getElementById('batchDropZone1');
+            const input = document.getElementById('batchSlot1');
+            if (!zone || !input) return;
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                zone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    zone.classList.add('ring-2', 'ring-emerald-500', 'bg-emerald-50/40');
+                }, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    zone.classList.remove('ring-2', 'ring-emerald-500', 'bg-emerald-50/40');
+                }, false);
+            });
+
+            zone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                zone.classList.remove('ring-2', 'ring-emerald-500', 'bg-emerald-50/40');
+                const dt = e.dataTransfer;
+                if (dt && dt.files && dt.files.length > 0) {
+                    try {
+                        const dataTrans = new DataTransfer();
+                        for (let f of dt.files) {
+                            if (f.type.startsWith('image/') || f.type.startsWith('video/') || /\.(png|jpe?g|webp|gif|bmp|heic|mov|mp4)$/i.test(f.name)) {
+                                dataTrans.items.add(f);
+                            }
+                        }
+                        if (dataTrans.files.length > 0) {
+                            input.files = dataTrans.files;
+                            updateBatchCount(1);
+                        } else {
+                            showToast('未检测到有效图片文件');
+                        }
+                    } catch (err) {
+                        console.error(err);
+                    }
+                }
+            }, false);
         }
 
         function renderWhitelistTags() {
@@ -3932,7 +4127,7 @@ INDEX_HTML = """
                 return;
             }
             if (!f1) {
-                showToast('请在【图1 · 封面图】上传封面配图！');
+                showToast('请上传笔记单图配图！');
                 return;
             }
 
@@ -3941,8 +4136,10 @@ INDEX_HTML = """
             btn.disabled = true;
 
             const b64_1 = await fileToBase64(f1);
-            const b64_2 = await fileToBase64(f2);
-            const b64_3 = await fileToBase64(f3);
+            const f2Input = document.getElementById('slot2File');
+            const f3Input = document.getElementById('slot3File');
+            const b64_2 = f2Input && f2Input.files && f2Input.files[0] ? await fileToBase64(f2Input.files[0]) : '';
+            const b64_3 = f3Input && f3Input.files && f3Input.files[0] ? await fileToBase64(f3Input.files[0]) : '';
 
             try {
                 const res = await fetch('/api/admin/materials/add', {
@@ -3965,11 +4162,11 @@ INDEX_HTML = """
                     document.getElementById('newGroupInput').value = '';
                     document.getElementById('newCopyInput').value = '';
                     document.getElementById('slot1File').value = '';
-                    document.getElementById('slot2File').value = '';
-                    document.getElementById('slot3File').value = '';
-                    document.getElementById('slot1Preview').innerHTML = '待选图1';
-                    document.getElementById('slot2Preview').innerHTML = '待选图2';
-                    document.getElementById('slot3Preview').innerHTML = '待选图3';
+                    if (document.getElementById('slot2File')) document.getElementById('slot2File').value = '';
+                    if (document.getElementById('slot3File')) document.getElementById('slot3File').value = '';
+                    document.getElementById('slot1Preview').innerHTML = '待选配图';
+                    if (document.getElementById('slot2Preview')) document.getElementById('slot2Preview').innerHTML = '待选图2';
+                    if (document.getElementById('slot3Preview')) document.getElementById('slot3Preview').innerHTML = '待选图3';
                     loadAdminData();
                 } else {
                     showToast(data.error);
@@ -3984,17 +4181,19 @@ INDEX_HTML = """
 
         async function submitBatchMaterials() {
             const f1_files = document.getElementById('batchSlot1').files;
-            const f2_files = document.getElementById('batchSlot2').files;
-            const f3_files = document.getElementById('batchSlot3').files;
+            const f2_input = document.getElementById('batchSlot2');
+            const f3_input = document.getElementById('batchSlot3');
+            const f2_files = f2_input ? f2_input.files : null;
+            const f3_files = f3_input ? f3_input.files : null;
             const raw_copy = document.getElementById('batchCopyInput').value.trim();
-            const prefix = document.getElementById('batchPrefix').value.trim() || '批量矩阵_';
+            const prefix = document.getElementById('batchPrefix').value.trim() || '单图作品_';
 
             if (!f1_files || f1_files.length === 0) {
-                showToast('请至少在【图1·封面图】选择一批实况/图片！');
+                showToast('请至少在【第一步：批量多选】选择一批单图配图！');
                 return;
             }
             if (!raw_copy) {
-                showToast('请在文案池中粘贴文案内容！');
+                showToast('请在文案池中输入/粘贴文案或点击【📁 批量上传 .txt 文案】！');
                 return;
             }
 
@@ -4011,9 +4210,13 @@ INDEX_HTML = """
             const b64_1 = [];
             for (let i = 0; i < f1_files.length; i++) b64_1.push(await fileToBase64(f1_files[i]));
             const b64_2 = [];
-            for (let i = 0; i < f2_files.length; i++) b64_2.push(await fileToBase64(f2_files[i]));
+            if (f2_files) {
+                for (let i = 0; i < f2_files.length; i++) b64_2.push(await fileToBase64(f2_files[i]));
+            }
             const b64_3 = [];
-            for (let i = 0; i < f3_files.length; i++) b64_3.push(await fileToBase64(f3_files[i]));
+            if (f3_files) {
+                for (let i = 0; i < f3_files.length; i++) b64_3.push(await fileToBase64(f3_files[i]));
+            }
 
             try {
                 const res = await fetch('/api/admin/materials/batch_add', {
@@ -4034,12 +4237,13 @@ INDEX_HTML = """
                 if (data.success) {
                     showToast(data.message);
                     document.getElementById('batchSlot1').value = '';
-                    document.getElementById('batchSlot2').value = '';
-                    document.getElementById('batchSlot3').value = '';
+                    if (document.getElementById('batchSlot2')) document.getElementById('batchSlot2').value = '';
+                    if (document.getElementById('batchSlot3')) document.getElementById('batchSlot3').value = '';
                     document.getElementById('batchCopyInput').value = '';
                     updateBatchCount(1);
                     updateBatchCount(2);
                     updateBatchCount(3);
+                    updateBatchPreviewStats();
                     loadAdminData();
                 } else {
                     showToast(data.error);
@@ -4047,7 +4251,7 @@ INDEX_HTML = """
             } catch (err) {
                 showToast('批量上传失败');
             } finally {
-                btn.innerHTML = '<span>⚡️ 一键批量自动组装并入库</span>';
+                btn.innerHTML = '<span>⚡️ 立即一键生成入库（1图配1文案）</span>';
                 btn.disabled = false;
             }
         }
