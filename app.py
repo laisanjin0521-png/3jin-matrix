@@ -316,19 +316,17 @@ def sync_turso_to_local_db():
             VALUES (?, ?, ?)
             """, (u['name'], u['completed_count'], u['last_active']))
 
-        # 3. Sync materials from Turso cloud only if local materials is empty
-        cursor.execute("SELECT COUNT(*) FROM materials")
-        if cursor.fetchone()[0] == 0:
-            try:
-                t_cur.execute("SELECT id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at FROM materials")
-                t_mats = t_cur.fetchall()
-                for m in t_mats:
-                    cursor.execute("""
-                    INSERT OR IGNORE INTO materials (id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (m['id'], m['group_name'], m.get('title'), m.get('folder_path'), m.get('images_json'), m.get('copy_text'), m.get('last_tag'), m.get('status', 'available'), m.get('assigned_to'), m.get('assigned_at'), m.get('created_at')))
-            except Exception:
-                pass
+        # 3. Sync materials from Turso cloud (incremental sync with INSERT OR IGNORE)
+        try:
+            t_cur.execute("SELECT id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at FROM materials")
+            t_mats = t_cur.fetchall()
+            for m in t_mats:
+                cursor.execute("""
+                INSERT OR IGNORE INTO materials (id, group_name, title, folder_path, images_json, copy_text, last_tag, status, assigned_to, assigned_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (m['id'], m['group_name'], m.get('title'), m.get('folder_path'), m.get('images_json'), m.get('copy_text'), m.get('last_tag'), m.get('status', 'available'), m.get('assigned_to'), m.get('assigned_at'), m.get('created_at')))
+        except Exception:
+            pass
 
         # 4. Sync settings from Turso cloud
         try:
@@ -1045,6 +1043,14 @@ def claim_material():
     next_mat = cursor.fetchone()
     
     if not next_mat:
+        try:
+            sync_turso_to_local_db()
+            cursor.execute("SELECT * FROM materials WHERE status = 'available' ORDER BY id ASC LIMIT 1")
+            next_mat = cursor.fetchone()
+        except Exception:
+            pass
+
+    if not next_mat:
         conn.commit()
         conn.close()
         return jsonify({
@@ -1735,15 +1741,13 @@ def admin_stats():
 
     conn = get_db()
     cursor = conn.cursor()
+    try:
+        sync_turso_to_local_db()
+    except Exception:
+        pass
+
     cursor.execute('SELECT COUNT(*) FROM submissions')
     total_submissions = cursor.fetchone()[0]
-    if total_submissions == 0:
-        conn.close()
-        sync_turso_to_local_db()
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM submissions')
-        total_submissions = cursor.fetchone()[0]
 
     cursor.execute('SELECT COUNT(*) FROM materials')
     total_materials = cursor.fetchone()[0]
