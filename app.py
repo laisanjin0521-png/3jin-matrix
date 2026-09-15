@@ -2179,21 +2179,28 @@ INDEX_HTML = """
                 
                 <!-- Stat Cards -->
                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
-                        <div class="text-[11px] text-slate-500 font-medium">总素材组数</div>
-                        <div class="text-xl font-bold text-slate-900 mt-0.5" id="statTotal">0</div>
+                    <div class="bg-emerald-50/90 p-3 rounded-xl border-2 border-emerald-300 text-center shadow-xs">
+                        <div class="text-[11px] text-emerald-800 font-bold flex items-center justify-center space-x-1">
+                            <span>🟢</span>
+                            <span>待发放独家库存</span>
+                        </div>
+                        <div class="text-2xl font-black text-emerald-700 mt-0.5" id="statAvailable">0</div>
+                        <div id="statAvailableTip" class="text-[9px] text-emerald-600 font-bold mt-0.5">前台可随时领取</div>
                     </div>
-                    <div class="bg-emerald-50 p-3 rounded-xl border border-emerald-100 text-center">
-                        <div class="text-[11px] text-emerald-700 font-medium">剩余待领 (独家)</div>
-                        <div class="text-xl font-bold text-emerald-600 mt-0.5" id="statAvailable">0</div>
+                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
+                        <div class="text-[11px] text-slate-500 font-medium">📁 历史入库总数</div>
+                        <div class="text-xl font-bold text-slate-700 mt-0.5" id="statTotal">0</div>
+                        <div class="text-[9px] text-slate-400 font-medium mt-0.5">含已消耗作废</div>
                     </div>
                     <div class="bg-amber-50 p-3 rounded-xl border border-amber-100 text-center">
                         <div class="text-[11px] text-amber-700 font-medium">⏳ 待结算篇数</div>
                         <div class="text-xl font-bold text-amber-600 mt-0.5" id="statUnsettled">0</div>
+                        <div class="text-[9px] text-amber-600/80 font-medium mt-0.5">24h巡检考核中</div>
                     </div>
                     <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
                         <div class="text-[11px] text-blue-700 font-medium">✅ 已结算打卡</div>
                         <div class="text-xl font-bold text-blue-600 mt-0.5" id="statSettled">0</div>
+                        <div class="text-[9px] text-blue-600/80 font-medium mt-0.5">已完成支付对账</div>
                     </div>
                 </div>
 
@@ -2572,23 +2579,56 @@ INDEX_HTML = """
                 </div>
 
                 <!-- Material Inventory Management -->
-                <div>
-                    <div class="flex items-center justify-between mb-2">
-                        <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider">📦 素材库存状态清单 (一客一单 · 独家防复用)：</h3>
-                        <button onclick="clearCompletedMaterials()" class="text-[11px] text-red-600 hover:text-red-700 font-bold">
-                            🗑️ 一键清空所有已消耗素材
-                        </button>
+                <div class="p-3.5 bg-white rounded-2xl border border-slate-200 space-y-3 shadow-xs">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div class="flex items-center space-x-2">
+                            <h3 class="font-bold text-xs text-slate-800 uppercase tracking-wider flex items-center space-x-1">
+                                <span>📦</span>
+                                <span>素材作品库存管理</span>
+                            </h3>
+                            <span class="text-[10px] text-slate-400">（一客一单 · 独家防复用）</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <button onclick="clearCompletedMaterials()" class="text-[11px] text-slate-400 hover:text-red-600 transition font-medium">
+                                🗑️ 一键清空所有已消耗素材
+                            </button>
+                        </div>
                     </div>
-                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-52 overflow-y-auto">
+
+                    <!-- Material Status Tabs -->
+                    <div class="flex items-center justify-between border-b border-slate-200 pb-2 flex-wrap gap-2">
+                        <div class="flex items-center space-x-1.5" id="materialFilterTabs">
+                            <button onclick="setMaterialTab('available')" id="tabMatAvailable"
+                                class="px-3 py-1 rounded-lg text-xs font-bold transition flex items-center space-x-1 bg-emerald-600 text-white shadow-xs">
+                                <span>🟢 仅看待发放</span>
+                                <span id="badgeMatAvailable" class="ml-1 px-1.5 py-0.2 bg-white/25 rounded-full text-[10px]">0</span>
+                            </button>
+                            <button onclick="setMaterialTab('completed')" id="tabMatCompleted"
+                                class="px-3 py-1 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition flex items-center space-x-1">
+                                <span>🔘 已消耗作废</span>
+                                <span id="badgeMatCompleted" class="ml-1 px-1.5 py-0.2 bg-slate-200 text-slate-700 rounded-full text-[10px]">0</span>
+                            </button>
+                            <button onclick="setMaterialTab('all')" id="tabMatAll"
+                                class="px-3 py-1 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition flex items-center space-x-1">
+                                <span>📋 全部历史记录</span>
+                                <span id="badgeMatAll" class="ml-1 px-1.5 py-0.2 bg-slate-200 text-slate-700 rounded-full text-[10px]">0</span>
+                            </button>
+                        </div>
+                        <span id="currentMatFilterTip" class="text-[11px] text-emerald-700 font-bold hidden sm:inline">
+                            🟢 正在查看【待发放】作品清单（前台可随时领用）
+                        </span>
+                    </div>
+
+                    <div class="border border-slate-200 rounded-xl overflow-hidden max-h-56 overflow-y-auto">
                         <table class="w-full text-xs text-left border-collapse">
-                            <thead class="bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                                 <tr>
-                                    <th class="p-2">组号/名称</th>
-                                    <th class="p-2">标题</th>
-                                    <th class="p-2">尾Tag</th>
-                                    <th class="p-2">状态</th>
-                                    <th class="p-2">领走人</th>
-                                    <th class="p-2 text-right">操作</th>
+                                    <th class="p-2.5">组号/作品名</th>
+                                    <th class="p-2.5">文案标题</th>
+                                    <th class="p-2.5">尾部Tag</th>
+                                    <th class="p-2.5">状态</th>
+                                    <th class="p-2.5">领走人</th>
+                                    <th class="p-2.5 text-right">操作</th>
                                 </tr>
                             </thead>
                             <tbody id="adminMaterialsBody" class="divide-y divide-slate-100">
@@ -2709,6 +2749,8 @@ INDEX_HTML = """
         let currentWhitelist = JSON.parse(localStorage.getItem('saved_admin_whitelist') || '[]');
         let allAdminSubmissions = [];
         let currentlyFilteredSubmissions = [];
+        let allAdminMaterials = [];
+        let currentMaterialTab = 'available';
 
         window.addEventListener('DOMContentLoaded', () => {
             const savedName = localStorage.getItem('xhs_distributor_name') || '';
@@ -4303,6 +4345,16 @@ INDEX_HTML = """
                     refreshPipelineStatus();
                     document.getElementById('statTotal').innerText = data.stats.total_materials;
                     document.getElementById('statAvailable').innerText = data.stats.available;
+                    const availTip = document.getElementById('statAvailableTip');
+                    if (availTip) {
+                        if (data.stats.available === 0) {
+                            availTip.innerText = '⚠️ 待补货 · 当前无可用作品';
+                            availTip.className = 'text-[9px] text-amber-600 font-bold mt-0.5';
+                        } else {
+                            availTip.innerText = `✅ 充足 · ${data.stats.available} 篇待领用`;
+                            availTip.className = 'text-[9px] text-emerald-600 font-bold mt-0.5';
+                        }
+                    }
                     document.getElementById('statUnsettled').innerText = data.stats.unsettled_submissions || 0;
                     document.getElementById('statSettled').innerText = data.stats.settled_submissions || 0;
 
@@ -4322,29 +4374,8 @@ INDEX_HTML = """
                         }).join('');
                     }
 
-                    const matBody = document.getElementById('adminMaterialsBody');
-                    if (data.materials.length > 0) {
-                        matBody.innerHTML = data.materials.map(m => `
-                            <tr class="hover:bg-slate-50">
-                                <td class="p-2 font-bold text-slate-700 truncate max-w-[100px]">${m.group_name}</td>
-                                <td class="p-2 text-slate-600 truncate max-w-[120px]">${m.title}</td>
-                                <td class="p-2 font-mono text-[11px] text-blue-600">${m.last_tag || '-'}</td>
-                                <td class="p-2">
-                                    ${m.status === 'available' ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">待领(独家)</span>' :
-                                      m.status === 'assigned' ? '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">领用中</span>' :
-                                      '<span class="px-2 py-0.5 bg-slate-200 text-slate-600 font-bold rounded">已消耗作废</span>'}
-                                </td>
-                                <td class="p-2 text-slate-500">${m.assigned_to || '-'}</td>
-                                <td class="p-2 text-right">
-                                    <button onclick="deleteMaterial(${m.id}, '${m.group_name}')" class="text-red-600 hover:text-red-700 font-bold text-[11px]">
-                                        删除
-                                    </button>
-                                </td>
-                            </tr>
-                        `).join('');
-                    } else {
-                        matBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">暂无素材，请在上方添加新素材</td></tr>';
-                    }
+                    allAdminMaterials = data.materials || [];
+                    renderMaterialsList();
 
                     allAdminSubmissions = data.submissions || [];
                     updateFilterWorkerDropdown(data.workers || []);
@@ -4360,6 +4391,92 @@ INDEX_HTML = """
                 const matBody = document.getElementById('adminMaterialsBody');
                 if (matBody) matBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-red-500 font-bold">⚠️ 加载数据超时，请点击右上角 🔄 刷新库存重试</td></tr>';
                 showToast('加载管理后台失败，请检查网络');
+            }
+        }
+
+        function setMaterialTab(tab) {
+            currentMaterialTab = tab;
+            renderMaterialsList();
+        }
+
+        function renderMaterialsList() {
+            const matBody = document.getElementById('adminMaterialsBody');
+            if (!matBody) return;
+
+            const availableItems = allAdminMaterials.filter(m => m.status === 'available' || m.status === 'assigned');
+            const completedItems = allAdminMaterials.filter(m => m.status === 'completed');
+            const totalCount = allAdminMaterials.length;
+
+            const badgeAvail = document.getElementById('badgeMatAvailable');
+            const badgeComp = document.getElementById('badgeMatCompleted');
+            const badgeAll = document.getElementById('badgeMatAll');
+            if (badgeAvail) badgeAvail.innerText = availableItems.length;
+            if (badgeComp) badgeComp.innerText = completedItems.length;
+            if (badgeAll) badgeAll.innerText = totalCount;
+
+            // Update Tab styles
+            const tabAvail = document.getElementById('tabMatAvailable');
+            const tabComp = document.getElementById('tabMatCompleted');
+            const tabAll = document.getElementById('tabMatAll');
+            const tipEl = document.getElementById('currentMatFilterTip');
+
+            const activeClassBase = 'px-3 py-1 rounded-lg text-xs font-bold transition flex items-center space-x-1 text-white shadow-xs ';
+            const inactiveClass = 'px-3 py-1 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition flex items-center space-x-1';
+
+            if (tabAvail) tabAvail.className = currentMaterialTab === 'available' ? (activeClassBase + 'bg-emerald-600') : inactiveClass;
+            if (tabComp) tabComp.className = currentMaterialTab === 'completed' ? (activeClassBase + 'bg-slate-700') : inactiveClass;
+            if (tabAll) tabAll.className = currentMaterialTab === 'all' ? (activeClassBase + 'bg-blue-600') : inactiveClass;
+
+            if (tipEl) {
+                if (currentMaterialTab === 'available') {
+                    tipEl.className = 'text-[11px] text-emerald-700 font-bold hidden sm:inline';
+                    tipEl.innerHTML = `🟢 正在查看【待发放】作品 (${availableItems.length} 篇可随时领用)`;
+                } else if (currentMaterialTab === 'completed') {
+                    tipEl.className = 'text-[11px] text-slate-500 font-bold hidden sm:inline';
+                    tipEl.innerHTML = `🔘 正在查看【已消耗作废】作品 (${completedItems.length} 篇已分发打卡)`;
+                } else {
+                    tipEl.className = 'text-[11px] text-blue-700 font-bold hidden sm:inline';
+                    tipEl.innerHTML = `📋 正在查看【全部历史】作品 (共 ${totalCount} 篇)`;
+                }
+            }
+
+            // Filter items for display
+            let displayList = [];
+            if (currentMaterialTab === 'available') {
+                displayList = availableItems;
+            } else if (currentMaterialTab === 'completed') {
+                displayList = completedItems;
+            } else {
+                displayList = allAdminMaterials;
+            }
+
+            if (displayList.length > 0) {
+                matBody.innerHTML = displayList.map(m => `
+                    <tr class="hover:bg-slate-50">
+                        <td class="p-2.5 font-bold text-slate-700 truncate max-w-[120px]" title="${m.group_name}">${m.group_name}</td>
+                        <td class="p-2.5 text-slate-600 truncate max-w-[160px]" title="${m.title}">${m.title}</td>
+                        <td class="p-2.5 font-mono text-[11px] text-blue-600">${m.last_tag || '-'}</td>
+                        <td class="p-2.5">
+                            ${m.status === 'available' ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 font-bold rounded">待领(独家)</span>' :
+                              m.status === 'assigned' ? '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 font-bold rounded">领用中</span>' :
+                              '<span class="px-2 py-0.5 bg-slate-100 text-slate-500 font-medium rounded">已消耗作废</span>'}
+                        </td>
+                        <td class="p-2.5 text-slate-500">${m.assigned_to || '-'}</td>
+                        <td class="p-2.5 text-right">
+                            <button onclick="deleteMaterial(${m.id}, '${m.group_name}')" class="text-red-600 hover:text-red-700 font-bold text-[11px]">
+                                删除
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } else {
+                let emptyMsg = '暂无素材，请在上方添加新素材';
+                if (currentMaterialTab === 'available') {
+                    emptyMsg = '🎉 当前所有作品均已发放完毕！待发库存为 0，请在上方装配补充新作品。';
+                } else if (currentMaterialTab === 'completed') {
+                    emptyMsg = '暂无已消耗作废的素材记录';
+                }
+                matBody.innerHTML = `<tr><td colspan="6" class="p-6 text-center text-slate-400 font-medium">${emptyMsg}</td></tr>`;
             }
         }
 
